@@ -380,23 +380,26 @@ class ParallelVideoProcessor:
             
                 # 번역 처리 (스트리밍 번역이 실패했거나 없는 경우)
                 translations = {}
-                if translator and task_args.get('translate_languages') and not streaming_translator:
-                    result_queue.put({
-                        'type': 'worker_progress',
-                        'worker_id': worker_id,
-                        'chunk_index': chunk_info.index,
-                        'progress': 80,
-                        'status': '번역 시작...'
-                    })
+                if translator and task_args.get('translate_languages'):
+                   if streaming_translator:
+                       # 스트리밍 번역 결과 가져오기
+                       streaming_translator.flush_all()  # 남은 버퍼 처리
+                       translations = streaming_translator.get_results()
+                       result_queue.put({
+                           'type': 'log',
+                           'message': f"[Worker {worker_id}] 스트리밍 번역 완료: {len(translations)}개 언어"
+                       })
+                   else:
+                       # 기존 병렬 번역 사용
                     
-                    # 청크별 번역 실행
-                    source_lang = task_args.get('source_lang', 'en_XX')
-                    translations = translator.translate_for_chunk(
-                        adjusted_segments,
-                        task_args['translate_languages'],
-                        source_lang,
-                        chunk_info.index
-                    )
+                        # 청크별 번역 실행
+                        source_lang = task_args.get('source_lang', 'en_XX')
+                        translations = translator.translate_for_chunk(
+                            adjusted_segments,
+                            task_args['translate_languages'],
+                            source_lang,
+                            chunk_info.index
+                        )
                 
                 # 완료 시 100% 전송
                 result_queue.put({
@@ -552,12 +555,8 @@ class ParallelVideoProcessor:
         merged_segments, merged_translations = self.merge_overlapping_results(results)
         
         # 실시간 번역 결과가 있으면 병합
-        if realtime_translations:
-            for lang, segments in realtime_translations.items():
-                if lang not in merged_translations:
-                    # 정렬 후 병합
-                    segments.sort(key=lambda x: x['start'])
-                    merged_translations[lang] = merge_overlapping_segments(segments)
+        # 실시간 번역 결과는 이미 각 워커의 translations에 포함됨
+        # realtime_translations는 UI 표시용으로만 사용
         
         # 7. 임시 파일 정리
         if progress_callback:
@@ -631,6 +630,8 @@ class ParallelVideoProcessor:
         
         # 번역 결과도 정리
         for lang in all_translations:
+            # 시간순 정렬 후 병합
+            all_translations[lang].sort(key=lambda x: x['start'])
             all_translations[lang] = merge_overlapping_segments(all_translations[lang])
         
         return merged_segments, all_translations

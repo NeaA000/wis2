@@ -119,20 +119,27 @@ class VideoProcessor:
                 # 번역 결과는 이미 realtimeTranslation 시그널로 전송됨
                 # 여기서는 파일로 저장만 수행
             
+        
             # 병렬 처리에서 번역이 이미 완료된 경우
             if isinstance(result, dict) and 'translations' in result:
                 # 번역된 결과 저장
                 for lang_code, trans_segments in result['translations'].items():
                     if trans_segments:
+                    # 중복 제거 (병렬 처리 시 오버랩 구간 처리)
+                        if self.worker.settings.get('advanced_duplicate_removal', True):
+                            trans_segments = advanced_remove_duplicates(trans_segments)
+                        else:
+                            trans_segments = remove_duplicate_segments(trans_segments)
+            
                         trans_srt_path = os.path.join(
                             self.worker.settings['output_dir'],
                             f"{video_name}_{lang_code.split('_')[0]}.srt"
                         )
                         with open(trans_srt_path, "w", encoding="utf-8") as srt_file:
                             write_srt(trans_segments, srt_file)
-                        
+            
                         self.worker.safe_emit(self.worker.log, f"✓ {lang_code} 자막 저장: {trans_srt_path}")
-                        
+            
                         # 비디오 임베딩
                         if not self.worker.settings['srt_only']:
                             self.embed_subtitles(

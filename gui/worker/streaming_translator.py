@@ -68,6 +68,10 @@ class StreamingTranslator:
         self.translation_cache = {}
         self.cache_size = 1000
         self.max_queue_size = 1000  # 메모리 보호
+
+        # 번역 결과 저장
+        self.translation_results = {lang: [] for lang in self.target_languages}
+        self.results_lock = threading.Lock()
         
         # 스레드 풀
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -212,6 +216,14 @@ class StreamingTranslator:
             
             # 캐시에 저장
             self._save_to_cache(segment.text, target_lang, translation)
+
+            # 결과 저장
+            with self.results_lock:
+              self.translation_results[target_lang].append({
+                   'start': segment.start,
+                   'end': segment.end,
+                   'text': translation
+               })
             
             # 통계 업데이트
             elapsed = time.time() - start_time
@@ -274,6 +286,14 @@ class StreamingTranslator:
             for seg, trans in zip(segments, translations):
                 # 캐시에 저장
                 self._save_to_cache(seg.text, target_lang, trans)
+
+                # 결과 저장
+                with self.results_lock:
+                   self.translation_results[target_lang].append({
+                       'start': seg.start,
+                       'end': seg.end,
+                       'text': trans
+                   })
                 
                 if self.callback:
                     self.callback({
@@ -335,9 +355,12 @@ class StreamingTranslator:
         Returns:
             {language_code: [segments]}
         """
-        # 이 메서드는 필요시 결과를 수집하는 용도로 사용
-        # 실제 구현은 콜백을 통해 결과를 수집하는 방식으로
-        pass
+        with self.results_lock:
+           # 각 언어별로 시간순 정렬
+           sorted_results = {}
+           for lang, segments in self.translation_results.items():
+               sorted_results[lang] = sorted(segments, key=lambda x: x['start'])
+           return sorted_results
 
 
 # 사용 예시
