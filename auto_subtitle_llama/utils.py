@@ -1,383 +1,324 @@
-"""
-비디오 처리 관련 로직
-"""
-from auto_subtitle_llama.cli import get_audio
-
-from auto_subtitle_llama.utils import filename, write_srt, get_text_batch, replace_text_batch, LANG_CODE_MAPPER, remove_duplicate_segments, advanced_remove_duplicates
-import whisper
-import ffmpeg
-import pickle
 import os
-import copy
-import time
-import tempfile
-import traceback
+from typing import Iterator, TextIO, List
 import threading
+import difflib
+import re
 
-class VideoProcessor:
-    """비디오 처리 전담 클래스"""
+LANG_CODE_MAPPER = {
+    "en": ["english", "en_XX"],
+    "zh": ["chinese", "zh_CN"],
+    "de": ["german", "de_DE"],
+    "es": ["spanish", "es_XX"],
+    "ru": ["russian", "ru_RU"],
+    "ko": ["korean", "ko_KR"],
+    "fr": ["french", "fr_XX"],
+    "ja": ["japanese", "ja_XX"],
+    "pt": ["portuguese", "pt_XX"],
+    "tr": ["turkish", "tr_TR"],
+    "pl": ["polish", "pl_PL"],
+    "nl": ["dutch", "nl_XX"],
+    "ar": ["arabic", "ar_AR"],
+    "sv": ["swedish", "sv_SE"],
+    "it": ["italian", "it_IT"],
+    "id": ["indonesian", "id_ID"],
+    "hi": ["hindi", "hi_IN"],
+    "fi": ["finnish", "fi_FI"],
+    "vi": ["vietnamese", "vi_VN"],
+    "he": ["hebrew", "he_IL"],
+    "uk": ["ukrainian", "uk_UA"],
+    "cs": ["czech", "cs_CZ"],
+    "ro": ["romanian", "ro_RO"],
+    "ta": ["tamil", "ta_IN"],
+    "no": ["norwegian", ""],
+    "th": ["thai", "th_TH"],
+    "ur": ["urdu", "ur_PK"],
+    "hr": ["croatian", "hr_HR"],
+    "lt": ["lithuanian", "lt_LT"],
+    "ml": ["malayalam", "ml_IN"],
+    "te": ["telugu", "te_IN"],
+    "fa": ["persian", "fa_IR"],
+    "lv": ["latvian", "lv_LV"],
+    "bn": ["bengali", "bn_IN"],
+    "az": ["azerbaijani", "az_AZ"],
+    "et": ["estonian", "et_EE"],
+    "mk": ["macedonian", "mk_MK"],
+    "ne": ["nepali", "ne_NP"],
+    "mn": ["mongolian", "mn_MN"],
+    "kk": ["kazakh", "kk_KZ"],
+    "sw": ["swahili", "sw_KE"],
+    "gl": ["galician", "gl_ES"],
+    "mr": ["marathi", "mr_IN"],
+    "si": ["sinhala", "si_LK"],
+    "km": ["khmer", "km_KH"],
+    "af": ["afrikaans", "af_ZA"],
+    "ka": ["georgian", "ka_GE"],
+    "gu": ["gujarati", "gu_IN"],
+    "lb": ["luxembourgish", "ps_AF"],
+    "tl": ["tagalog", "tl_XX"],
+}
+
+
+def str2bool(string):
+    string = string.lower()
+    str2val = {"true": True, "false": False}
+
+    if string in str2val:
+        return str2val[string]
+    else:
+        raise ValueError(
+            f"Expected one of {set(str2val.keys())}, got {string}")
+
+
+def format_timestamp(seconds: float, always_include_hours: bool = False):
+    assert seconds >= 0, "non-negative timestamp expected"
+    milliseconds = round(seconds * 1000.0)
+
+    hours = milliseconds // 3_600_000
+    milliseconds -= hours * 3_600_000
+
+    minutes = milliseconds // 60_000
+    milliseconds -= minutes * 60_000
+
+    seconds = milliseconds // 1_000
+    milliseconds -= seconds * 1_000
+
+    hours_marker = f"{hours:02d}:" if always_include_hours or hours > 0 else ""
+    return f"{hours_marker}{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+
+def write_srt(transcript: Iterator[dict], file: TextIO):
+    for i, segment in enumerate(transcript, start=1):
+        print(
+            f"{i}\n"
+            f"{format_timestamp(segment['start'], always_include_hours=True)} --> "
+            f"{format_timestamp(segment['end'], always_include_hours=True)}\n"
+            f"{segment['text'].strip().replace('-->', '->')}\n",
+            file=file,
+            flush=True,
+        )
+
+
+def filename(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+class TranslatorManager:
+    """번역 모델 싱글톤 매니저"""
+    _instance = None
+    _lock = threading.Lock()
+    _model = None
+    _tokenizer = None
     
-    def __init__(self, worker):
-        self.worker = worker
-        self.model = None
+    def __new__(cls):
+        if not cls._instance:
+            with cls._lock:
+                if not cls._instance:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def get_translator(self):
+        """번역 모델과 토크나이저 반환"""
+        if self._model is None:
+            with self._lock:
+                if self._model is None:
+                    self._load_model()
+        return self._model, self._tokenizer
+    
+    def _load_model(self):
+        """모델 로드 (한 번만 실행)"""
+        print("Loading translation model... (this may take a while)")
+        from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
+        self._model = MBartForConditionalGeneration.from_pretrained("SnypzZz/Llama2-13b-Language-translate")
+        self._tokenizer = MBart50TokenizerFast.from_pretrained("SnypzZz/Llama2-13b-Language-translate", src_lang="en_XX")
+        print("Translation model loaded successfully!")
+
+
+def load_translator(source_lang="en_XX"):
+    from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
+    model = MBartForConditionalGeneration.from_pretrained("SnypzZz/Llama2-13b-Language-translate")
+    tokenizer = MBart50TokenizerFast.from_pretrained("SnypzZz/Llama2-13b-Language-translate", src_lang=source_lang)
+    return model, tokenizer
+
+def get_text_batch(segments:List[dict]):
+    text_batch = []
+    for i, segment in enumerate(segments):
+        text_batch.append(segment['text'])
+    return text_batch
+
+def replace_text_batch(segments:List[dict], translated_batch:List[str]):
+    for i, segment in enumerate(segments):
+        segment['text'] = translated_batch[i]
+    return segments
+
+def remove_duplicate_segments(segments: List[dict], similarity_threshold: float = 0.85) -> List[dict]:
+    """중복된 자막 세그먼트 제거
+    
+    Args:
+        segments: Whisper가 생성한 세그먼트 리스트
+        similarity_threshold: 유사도 임계값 (0~1, 기본값 0.85)
+    
+    Returns:
+        중복이 제거된 세그먼트 리스트
+    """
+    if not segments:
+        return segments
+    
+    cleaned_segments = []
+    last_text = ""
+    consecutive_duplicates = 0
+    
+    for i, segment in enumerate(segments):
+        current_text = segment['text'].strip()
         
-    def load_model(self):
-        """Whisper 모델 로드"""
-        if not self.worker.is_cancelled:
-            self.worker.safe_emit(self.worker.log, f"Whisper {self.worker.settings['model']} 모델 로드 중...")
-            
-            if len(self.worker.video_paths) > 0:
-                video_name = filename(self.worker.video_paths[0])
-                self.worker.safe_emit(self.worker.progress, video_name, 5, "모델 준비 중...")
-                
-            self.model = whisper.load_model(self.worker.settings['model'])
-            self.worker.safe_emit(self.worker.log, f"✓ 모델 로드 완료")
-            
-        return self.model
+        # 텍스트 유사도 계산
+        similarity = difflib.SequenceMatcher(None, last_text, current_text).ratio()
         
-    def process_video(self, video_path, idx, total):
-        """단일 비디오 처리"""
-        video_name = filename(video_path)
-        self.worker.safe_emit(self.worker.log, f"\n[{idx+1}/{total}] {video_name} 처리 시작")
+        # 완전히 같거나 매우 유사한 경우
+        if similarity >= similarity_threshold and current_text:
+            consecutive_duplicates += 1
+            # 3번 이상 연속으로 중복되면 건너뛰기
+            if consecutive_duplicates >= 2:
+                print(f"중복 제거: [{segment['start']:.3f} --> {segment['end']:.3f}] {current_text}")
+                continue
+        else:
+            consecutive_duplicates = 0
         
-        try:
-            # 1. 캐시 확인
-            cache_path = self.worker.get_cache_path(video_path)
-            if os.path.exists(cache_path) and not self.worker.settings.get('force_reprocess', False):
-                self.worker.safe_emit(self.worker.progress, video_name, 10, "캐시에서 불러오는 중...")
-                with open(cache_path, 'rb') as f:
-                    cached_data = pickle.load(f)
-                    
-                if not self.worker.is_cancelled:
-                    self.process_cached_video(video_path, cached_data)
-                return
+        cleaned_segments.append(segment)
+        last_text = current_text
+    
+    print(f"중복 제거 완료: {len(segments)}개 → {len(cleaned_segments)}개")
+    
+    return cleaned_segments
+
+def advanced_remove_duplicates(segments: List[dict]) -> List[dict]:
+    """고급 중복 제거 - 시간과 내용을 모두 고려
+    
+    1. 연속된 중복 제거
+    2. 짧은 반복 패턴 제거
+    3. 시간 간격을 고려한 병합
+    """
+    if not segments:
+        return segments
+    
+    cleaned_segments = []
+    skip_until = -1
+    
+    for i, segment in enumerate(segments):
+        if i < skip_until:
+            continue
             
-            if self.worker.is_cancelled:
-                return
-                
-            # 2. 오디오 추출
-            self.worker.safe_emit(self.worker.progress, video_name, 20, "오디오 추출 중...")
-            self.worker.safe_emit(self.worker.log, "오디오 스트림 추출 중...")
-            audio_paths = get_audio([video_path])
-            self.worker.safe_emit(self.worker.log, "✓ 오디오 추출 완료")
+        current_text = segment['text'].strip()
+       
+        # 너무 짧은 텍스트는 노이즈일 가능성이 높음
+        if len(current_text) < 3 and not current_text.isalnum():
+            continue
+        
+        # 앞으로 최대 10개 세그먼트 확인
+        duplicate_indices = [i]
+        for j in range(i + 1, min(i + 10, len(segments))):
+            next_text = segments[j]['text'].strip()
+            similarity = difflib.SequenceMatcher(None, current_text, next_text).ratio()
             
-            if self.worker.is_cancelled:
-                return
-                
-            # 3. 음성 인식
-            result, detected_lang = self.transcribe_audio(
-                audio_paths[video_path], 
-                video_name
-            )
-            
-            if result is None or self.worker.is_cancelled:
-                return
-            # 중복 세그먼트 제거
-            original_count = len(result["segments"])
-            if self.worker.settings.get('advanced_duplicate_removal', True):
-                # 고급 중복 제거 사용
-                result["segments"] = advanced_remove_duplicates(result["segments"])
+            # 유사도가 높고 시간이 연속적인 경우
+            if similarity > 0.85:
+                time_gap = segments[j]['start'] - segments[j-1]['end']
+                if time_gap < 0.5:  # 0.5초 이내
+                    duplicate_indices.append(j)
+                else:
+                    break
             else:
-                # 기본 중복 제거 사용
-                result["segments"] = remove_duplicate_segments(result["segments"])
-            if original_count != len(result["segments"]):
-                self.worker.safe_emit(self.worker.log, f"중복 자막 {original_count - len(result['segments'])}개 제거됨")
-            
-                
-            # 4. 자막 저장
-            srt_path = self.save_subtitles(video_name, result["segments"])
-            subtitles = {video_path: srt_path}
-            
-            # 5. 캐시 저장
-            cache_data = {
-                'subtitles': subtitles,
-                'detected_lang': detected_lang,
-                'audio_paths': audio_paths,
-                'segments': result["segments"]
-            }
-            with open(cache_path, 'wb') as f:
-                pickle.dump(cache_data, f)
-            
-            self.worker.safe_emit(self.worker.log, f"✓ 원본 자막 생성 완료: {srt_path}")
-            
-            if self.worker.is_cancelled:
-                return
-                
-            # 6. 번역 처리
-            if self.worker.settings['translate'] and self.worker.settings['languages']:
-                self.process_translations(
-                    video_path, audio_paths, detected_lang, result["segments"]
-                )
-            
-            if self.worker.is_cancelled:
-                return
-                
-            # 7. 비디오 임베딩
-            if not self.worker.settings['srt_only']:
-                self.embed_subtitles(video_path, subtitles, detected_lang)
-                
-            # 완료
-            self.worker.safe_emit(self.worker.fileCompleted, video_name, srt_path)
-            self.worker.safe_emit(self.worker.progress, video_name, 100, "완료!")
-            
-        except Exception as e:
-            if not self.worker.is_cancelled:
-                self.worker.safe_emit(self.worker.log, f"❌ {video_name} 처리 중 오류: {str(e)}")
-                traceback.print_exc()
-                
-    def transcribe_audio(self, audio_path, video_name):
-        """음성 인식 수행"""
-        # 언어 감지
-        self.worker.safe_emit(self.worker.progress, video_name, 30, "언어 감지 중...")
-        
-        audio = whisper.load_audio(audio_path)
-        audio = whisper.pad_or_trim(audio)
-        mel = whisper.log_mel_spectrogram(audio, self.model.dims.n_mels).to(self.model.device)
-        _, probs = self.model.detect_language(mel)
-        detected_lang = max(probs, key=probs.get)
-        self.worker.safe_emit(self.worker.log, f"감지된 언어: {detected_lang}")
-
-        if self.worker.is_cancelled:
-            return None, None
-        
-        # 음성 인식
-        self.worker.safe_emit(self.worker.progress, video_name, 40, "음성 인식 시작...")
-        
-        # 진행률 파서의 플래그 설정
-        self.worker.progress_parser.is_transcribing = True
-        self.worker.progress_parser.transcribe_start_time = time.time()
-        
-        result = None
-        transcribe_thread = None
-        try:
-           # 취소 가능한 transcribe 구현
-            def transcribe_task():
-                nonlocal result
-                try:
-                    result = self.model.transcribe(
-                        audio_path,
-                        task="transcribe",
-                        language=detected_lang,  # 이제 detected_lang가 정의됨
-                        verbose=True,
-                        fp16=False
-                    )
-                except Exception as e:
-                    if not self.worker.is_cancelled:
-                        self.worker.safe_emit(self.worker.log, f"❌ 음성 인식 오류: {str(e)}")
-            
-            transcribe_thread = threading.Thread(target=transcribe_task)
-            self.worker.active_threads.append(transcribe_thread)
-            transcribe_thread.start()
-
-            # 주기적으로 취소 확인
-            while transcribe_thread.is_alive() and not self.worker.is_cancelled:
-                transcribe_thread.join(timeout=0.5)
-                
-            if self.worker.is_cancelled and transcribe_thread.is_alive():
-                # 강제 종료는 하지 않고 완료 대기 (최대 5초)
-                transcribe_thread.join(timeout=5.0)
-            
-        finally:
-            self.worker.progress_parser.is_transcribing = False
-            if transcribe_thread and transcribe_thread in self.worker.active_threads:  
-                self.worker.active_threads.remove(transcribe_thread)
-            
-        return result, detected_lang
-        
-    def save_subtitles(self, video_name, segments):
-        """자막 파일 저장"""
-        srt_path = os.path.join(self.worker.settings['output_dir'], f"{video_name}.srt")
-        with open(srt_path, "w", encoding="utf-8") as srt_file:
-            write_srt(segments, srt_file)
-        return srt_path
-        
-    def process_cached_video(self, video_path, cached_data):
-        """캐시된 비디오 처리"""
-        if self.worker.is_cancelled:
-            return
-            
-        video_name = filename(video_path)
-        self.worker.safe_emit(self.worker.progress, video_name, 50, "캐시 데이터 로드 완료")
-        
-        # 번역 처리
-        if self.worker.settings['translate'] and self.worker.settings['languages'] and not self.worker.is_cancelled:
-            segments = cached_data.get('segments', [])
-            self.process_translations(
-                video_path, 
-                cached_data['audio_paths'],
-                cached_data['detected_lang'],
-                segments
-            )
-            
-        # 비디오 임베딩
-        if not self.worker.settings['srt_only'] and not self.worker.is_cancelled:
-            self.embed_subtitles(
-                video_path,
-                cached_data['subtitles'],
-                cached_data['detected_lang']
-            )
-            
-        if not self.worker.is_cancelled:
-            output_path = list(cached_data['subtitles'].values())[0]
-            self.worker.safe_emit(self.worker.fileCompleted, video_name, output_path)
-            self.worker.safe_emit(self.worker.progress, video_name, 100, "완료!")
-            
-    def process_translations(self, video_path, audio_paths, detected_lang, segments):
-        """번역 처리"""
-        if self.worker.is_cancelled:
-            return
-            
-        video_name = filename(video_path)
-        total_langs = len(self.worker.settings['languages'])
-
-        # 번역 모듈 임포트 (지연 로딩)
-        try:
-            from auto_subtitle_llama.cli import translates
-        except ImportError:
-            self.worker.safe_emit(self.worker.log, "❌ 번역 모듈 로드 실패")
-            return
-
-         # mBART 소스 언어 코드 가져오기
-        current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
-        source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
-         
-        
-        for i, target_lang in enumerate(self.worker.settings['languages']):
-            if self.worker.is_cancelled:
                 break
-                
-            # 같은 언어는 건너뛰기
-            if target_lang.startswith(detected_lang):
+        
+        # 3개 이상 연속 중복이면
+        if len(duplicate_indices) >= 3:
+            # 첫 번째 세그먼트의 시작 시간과 마지막 세그먼트의 종료 시간으로 병합
+            merged_segment = segment.copy()
+            merged_segment['end'] = segments[duplicate_indices[-1]]['end']
+            cleaned_segments.append(merged_segment)
+            skip_until = duplicate_indices[-1] + 1
+            print(f"연속 중복 {len(duplicate_indices)}개 병합: [{merged_segment['start']:.3f} --> {merged_segment['end']:.3f}] {current_text[:30]}...")
+        else:
+            cleaned_segments.append(segment)
+   
+    # 추가 정리: 너무 짧은 간격의 동일 텍스트 제거
+    final_segments = []
+    text_last_seen = {}
+    
+    for segment in cleaned_segments:
+        text = segment['text'].strip()
+        current_time = segment['start']
+        
+        # 이전에 본 텍스트인 경우
+        if text in text_last_seen:
+            last_time = text_last_seen[text]
+            # 5초 이내에 같은 텍스트가 나왔다면 제거
+            if current_time - last_time < 5.0:
+                print(f"짧은 간격 중복 제거: [{segment['start']:.3f}] {text[:30]}...")
                 continue
-                
-            # 캐시 확인
-            cache_path = self.worker.get_cache_path(video_path, target_lang)
-            if os.path.exists(cache_path):
-                self.worker.safe_emit(
-                    self.worker.progress,
-                    video_name,
-                    60 + (i * 30 // total_langs),
-                    f"{target_lang} 캐시 로드 중..."
-                )
-                continue
-                
-            # 번역 수행
-            progress = 60 + (i * 30 // total_langs)
-            self.worker.safe_emit(self.worker.progress, video_name, progress, f"{target_lang} 번역 중...")
-            
-            try:
-                if self.worker.is_cancelled:
-                    break
-                    
-                self.worker.safe_emit(self.worker.log, f"{target_lang} 번역 시작...")
+        
+        text_last_seen[text] = current_time
+        final_segments.append(segment)
+    
+    print(f"고급 중복 제거 완료: {len(segments)}개 → {len(final_segments)}개")
+    return final_segments
 
-                # segments 깊은 복사
-                translated_segments = copy.deepcopy(segments)
-                
-                # 텍스트 배치 추출 및 번역
-                text_batch = get_text_batch(translated_segments)
-                # 번역 실행 (싱글톤 모델 사용)
-                translated_batch = translates(
-                    translate_to=target_lang, 
-                    text_batch=text_batch, 
-                    source_lang=source_mbart_code
-                )
-                
-                if self.worker.is_cancelled:
-                    break
-                    
-                # 번역된 텍스트로 segments 업데이트
-                translated_segments = replace_text_batch(translated_segments, translated_batch)
-                
-                # 번역된 SRT 저장
-                translated_srt_path = os.path.join(
-                    self.worker.settings['output_dir'], 
-                    f"{video_name}_{target_lang.split('_')[0]}.srt"
-                )
-                
-                with open(translated_srt_path, "w", encoding="utf-8") as srt_file:
-                    write_srt(translated_segments, srt_file)
-                
-                translated_subtitles = {video_path: translated_srt_path}
-                
-                # 번역 결과 캐시
-                with open(cache_path, 'wb') as f:
-                    pickle.dump({
-                        'subtitles': translated_subtitles,
-                        'segments': translated_segments
-                    }, f)
-                    
-                self.worker.safe_emit(self.worker.log, f"✓ {target_lang} 번역 완료")
-                
-                # 비디오 임베딩
-                if not self.worker.settings['srt_only'] and not self.worker.is_cancelled:
-                    self.embed_subtitles(
-                        video_path, translated_subtitles, detected_lang, target_lang
-                    )
-                    
-            except Exception as e:
-                if not self.worker.is_cancelled:
-                    self.worker.safe_emit(self.worker.log, f"❌ {target_lang} 번역 실패: {str(e)}")
-                    
-    def embed_subtitles(self, video_path, srt_paths, detected_lang, target_lang=None):
-        """비디오에 자막 임베딩"""
-        if self.worker.is_cancelled:
-            return
-            
-        video_name = filename(video_path)
-        self.worker.safe_emit(self.worker.progress, video_name, 90, "비디오에 자막 추가 중...")
+
+# ============= 병렬 처리를 위한 새로운 함수들 =============
+
+def merge_overlapping_segments(segments: List[dict], overlap_threshold: float = 0.1) -> List[dict]:
+    """시간이 겹치는 세그먼트 병합"""
+    if not segments:
+        return segments
+    
+    merged = [segments[0]]
+    
+    for current in segments[1:]:
+        last = merged[-1]
         
-        # 출력 파일명 생성
-        lang_suffix = f"_{detected_lang}"
-        if target_lang:
-            lang_suffix += f"2{target_lang.split('_')[0]}"
-            
-        out_filename = f"{video_name}_subtitled{lang_suffix}.mp4"
-        out_path = os.path.join(self.worker.settings['output_dir'], out_filename)
-        
-        try:
-            if self.worker.is_cancelled:
-                return
-                
-            srt_path = list(srt_paths.values())[0]
-            
-            video = ffmpeg.input(video_path)
-            audio = video.audio
-            
-            # 자막 스타일 적용
-            subtitle_style = (
-                "FallbackName=NanumGothic,"
-                "OutlineColour=&H40000000,"
-                "BorderStyle=3,"
-                "Fontsize=24,"
-                "MarginV=20"
-            )
-            
-            ffmpeg.concat(
-                video.filter('subtitles', srt_path, 
-                           force_style=subtitle_style, 
-                           charenc="UTF-8"),
-                audio,
-                v=1,
-                a=1
-            ).output(out_path).run(quiet=True, overwrite_output=True)
-            
-            self.worker.safe_emit(self.worker.log, f"✓ 자막 임베딩 완료: {out_filename}")
-            
-        except Exception as e:
-            if not self.worker.is_cancelled:
-                self.worker.safe_emit(self.worker.log, f"❌ 자막 임베딩 실패: {str(e)}")
-                
-    def cleanup_temp_files(self):
-        """임시 파일 정리"""
-        temp_dir = tempfile.gettempdir()
-        
-        for video_path in self.worker.video_paths:
-            audio_filename = f"{filename(video_path)}.wav"
-            audio_path = os.path.join(temp_dir, audio_filename)
-            if os.path.exists(audio_path):
-                try:
-                    os.remove(audio_path)
-                    print(f"임시 파일 삭제: {audio_path}")
-                except Exception as e:
-                    print(f"임시 파일 삭제 실패: {e}")
+        # 시간이 겹치면 병합
+        if current['start'] < last['end'] + overlap_threshold:
+            # 텍스트 병합 (중복 제거)
+            if current['text'].strip() != last['text'].strip():
+                last['text'] = last['text'].rstrip() + ' ' + current['text'].lstrip()
+            last['end'] = max(last['end'], current['end'])
+        else:
+            merged.append(current)
+    
+    return merged
+
+
+def find_best_split_point(text: str, max_length: int = 80) -> int:
+    """텍스트의 최적 분할 지점 찾기"""
+    if len(text) <= max_length:
+        return len(text)
+    
+    # 문장 끝 찾기 (. ? !)
+    sentence_end = max(
+        text.rfind('.', 0, max_length),
+        text.rfind('?', 0, max_length),
+        text.rfind('!', 0, max_length)
+    )
+    if sentence_end > 0:
+        return sentence_end + 1
+    
+    # 쉼표 찾기
+    comma = text.rfind(',', 0, max_length)
+    if comma > 0:
+        return comma + 1
+    
+    # 공백 찾기
+    space = text.rfind(' ', 0, max_length)
+    if space > 0:
+        return space + 1
+    
+    return max_length
+
+
+def adjust_timestamps(segments: List[dict], offset: float) -> List[dict]:
+    """세그먼트의 타임스탬프를 오프셋만큼 조정"""
+    adjusted = []
+    for segment in segments:
+        adjusted_segment = segment.copy()
+        adjusted_segment['start'] += offset
+        adjusted_segment['end'] += offset
+        adjusted.append(adjusted_segment)
+    return adjusted

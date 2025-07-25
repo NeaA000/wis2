@@ -2,7 +2,6 @@
 비디오 처리 관련 로직
 """
 from auto_subtitle_llama.cli import get_audio
-
 from auto_subtitle_llama.utils import filename, write_srt, get_text_batch, replace_text_batch, LANG_CODE_MAPPER, remove_duplicate_segments, advanced_remove_duplicates
 import whisper
 import ffmpeg
@@ -40,6 +39,9 @@ class VideoProcessor:
         video_name = filename(video_path)
         self.worker.safe_emit(self.worker.log, f"\n[{idx+1}/{total}] {video_name} 처리 시작")
         
+        # 현재 비디오 경로 저장 (병렬 처리용)
+        self.worker.current_video_path = video_path
+        
         try:
             # 1. 캐시 확인
             cache_path = self.worker.get_cache_path(video_path)
@@ -72,6 +74,7 @@ class VideoProcessor:
             
             if result is None or self.worker.is_cancelled:
                 return
+                
             # 중복 세그먼트 제거
             original_count = len(result["segments"])
             if self.worker.settings.get('advanced_duplicate_removal', True):
@@ -83,7 +86,6 @@ class VideoProcessor:
             if original_count != len(result["segments"]):
                 self.worker.safe_emit(self.worker.log, f"중복 자막 {original_count - len(result['segments'])}개 제거됨")
             
-                
             # 4. 자막 저장
             srt_path = self.save_subtitles(video_name, result["segments"])
             subtitles = {video_path: srt_path}
@@ -140,7 +142,79 @@ class VideoProcessor:
         if self.worker.is_cancelled:
             return None, None
         
-        # 음성 인식
+        # 오디오 길이 확인
+        try:
+            probe = ffmpeg.probe(audio_path)
+            duration = float(probe['streams'][0]['duration'])
+            self.worker.safe_emit(self.worker.log, f"오디오 길이: {duration//60:.0f}분 {duration%60:.0f}초")
+        except:
+            duration = 0
+            self.worker.safe_emit(self.worker.log, "오디오 길이 확인 실패, 단일 처리 모드 사용")
+        
+        # 30분(1800초) 이상이고 병렬 처리 설정이 켜져있으면 병렬 처리
+        if duration > 1800 and self.worker.settings.get('parallel_processing', True):
+            self.worker.safe_emit(
+                self.worker.log, 
+                f"긴 오디오 감지 ({duration//60:.0f}분). 병렬 처리 시작..."
+            )
+            
+            # 병렬 처리
+            try:
+                from gui.parallel_processor import process_long_video_parallel
+            except ImportError:
+                self.worker.safe_emit(self.worker.log, "❌ 병렬 처리 모듈 로드 실패, 단일 처리로 전환")
+                return self._transcribe_single(audio_path, video_name, detected_lang)
+            
+            # 진행률 콜백 함수
+            def progress_callback(message, percent):
+                self.worker.safe_emit(
+                    self.worker.progress, 
+                    video_name, 
+                    40 + int(percent * 0.4),  # 40~80% 구간 사용
+                    message
+                )
+            
+            # video_path 가져오기
+            video_path = self.worker.current_video_path
+            
+            result = process_long_video_parallel(
+                video_path=video_path,
+                audio_path=audio_path,
+                model_name=self.worker.settings['model'],
+                task_args={
+                    'task': 'transcribe',
+                    'language': detected_lang
+                },
+                num_workers=self.worker.settings.get('num_workers', 3),
+                progress_callback=progress_callback
+            )
+            
+            # 에러 체크
+            if result.get('errors'):
+                self.worker.safe_emit(
+                    self.worker.log, 
+                    f"⚠️ {len(result['errors'])}개 청크에서 오류 발생"
+                )
+            
+            # 병렬 처리 결과 포맷 맞추기
+            formatted_result = {
+                'segments': result['segments'],
+                'language': detected_lang
+            }
+            
+            self.worker.safe_emit(
+                self.worker.log, 
+                f"✓ 병렬 처리 완료: {len(result['segments'])}개 세그먼트"
+            )
+            
+            return formatted_result, detected_lang
+            
+        else:
+            # 30분 미만 또는 병렬 처리 비활성화 시 단일 처리
+            return self._transcribe_single(audio_path, video_name, detected_lang)
+    
+    def _transcribe_single(self, audio_path, video_name, detected_lang):
+        """단일 스레드 음성 인식"""
         self.worker.safe_emit(self.worker.progress, video_name, 40, "음성 인식 시작...")
         
         # 진행률 파서의 플래그 설정
@@ -150,14 +224,14 @@ class VideoProcessor:
         result = None
         transcribe_thread = None
         try:
-           # 취소 가능한 transcribe 구현
+            # 취소 가능한 transcribe 구현
             def transcribe_task():
                 nonlocal result
                 try:
                     result = self.model.transcribe(
                         audio_path,
                         task="transcribe",
-                        language=detected_lang,  # 이제 detected_lang가 정의됨
+                        language=detected_lang,
                         verbose=True,
                         fp16=False
                     )
@@ -237,11 +311,10 @@ class VideoProcessor:
             self.worker.safe_emit(self.worker.log, "❌ 번역 모듈 로드 실패")
             return
 
-         # mBART 소스 언어 코드 가져오기
+        # mBART 소스 언어 코드 가져오기
         current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
         source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
          
-        
         for i, target_lang in enumerate(self.worker.settings['languages']):
             if self.worker.is_cancelled:
                 break

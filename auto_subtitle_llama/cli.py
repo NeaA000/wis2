@@ -4,7 +4,7 @@ import whisper
 import argparse
 import warnings
 import tempfile
-from .utils import LANG_CODE_MAPPER, WHISPER_TO_MBART_LANG_CODE, str2bool, format_timestamp, write_srt, filename, load_translator, get_text_batch, replace_text_batch
+from .utils import LANG_CODE_MAPPER, str2bool, format_timestamp, write_srt, filename, load_translator, get_text_batch, replace_text_batch
 from typing import List, Tuple
 from tqdm import tqdm
 from .utils import TranslatorManager
