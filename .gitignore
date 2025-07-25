@@ -5,3 +5,33 @@ auto_subtitle/__pycache__
 build
 subtitled
 *.mp4
+
+
+# Python 가상환경
+venv/
+venv311/
+env/
+ENV/
+
+# Python 캐시 파일
+__pycache__/
+*.py[cod]
+*.pyo
+
+*.pyc
+*.pyo
+*.pyd
+
+# OS 및 에디터 관련
+.DS_Store
+.idea/
+.vscode/
+
+# 패키지 빌드 파일
+*.egg-info/
+build/
+dist/
+
+# 로그/데이터베이스/임시파일
+*.log
+*.sqlite3
