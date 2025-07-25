@@ -112,6 +112,10 @@ class ProgressParser:
         self.is_downloading_model = False
         self.is_transcribing = False
         self.transcribe_start_time = None
+        self.audio_duration = None
+        self.last_timestamp = 0
+        self.total_segments = 0
+        self.processed_segments = 0
         
     def parse_download_progress(self, line):
         """Whisper 모델 다운로드 진행률 파싱"""
@@ -171,40 +175,122 @@ class ProgressParser:
             
         return False
     
+    def set_audio_duration(self, duration):
+        """오디오 길이 설정 (초 단위)"""
+        self.audio_duration = duration
+        self.last_timestamp = 0
+        self.total_segments = 0
+        self.processed_segments = 0
+    
+    
     def parse_transcribe_progress(self, line, video_name):
         """Whisper 음성 인식 진행률 파싱"""
         if not self.is_transcribing:
             return False
             
-        # Whisper 진행률 패턴들
-        timestamp_pattern = r'\[(\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}\.\d{3})\]'
+        # 여러 가지 Whisper 출력 패턴 매칭
+        # 패턴 1: [00:00.000 --> 00:02.000]  텍스트
+        timestamp_pattern = r'\[(\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}\.\d{3})\]\s*(.+)?'
         match = re.search(timestamp_pattern, line)
+
+        if not match:
+            # 패턴 2: 00:00.000 --> 00:02.000  텍스트
+            timestamp_pattern2 = r'(\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}\.\d{3})\s*(.+)?'
+            match = re.search(timestamp_pattern2, line)
+ 
         
         if match:
             current_time = match.group(2)
+            text = match.group(3) if len(match.groups()) >= 3 else ""
             
             # 시간을 초 단위로 변환
             time_parts = current_time.split(':')
             minutes = int(time_parts[0])
             seconds = float(time_parts[1])
             total_seconds = minutes * 60 + seconds
+            self.last_timestamp = total_seconds
+            self.processed_segments += 1
             
-            # 오디오 길이를 기반으로 진행률 계산
-            estimated_total = 600  # 10분
-            percent = min(int((total_seconds / estimated_total) * 100), 95)
-            
-            status = f"음성 인식 중... [{current_time}]"
+            # 실제 오디오 길이를 기반으로 진행률 계산
+            if self.audio_duration and self.audio_duration > 0:
+                percent = min(int((total_seconds / self.audio_duration) * 100), 95)
+                
+                # 남은 시간 계산
+                remaining_seconds = self.audio_duration - total_seconds
+                if remaining_seconds > 0:
+                    elapsed = time.time() - self.transcribe_start_time if self.transcribe_start_time else 0
+                    if elapsed > 0 and total_seconds > 0:
+                        # 처리 속도 기반 예측
+                        speed = total_seconds / elapsed
+                        estimated_remaining = remaining_seconds / speed if speed > 0 else remaining_seconds
+                        
+                        if estimated_remaining > 60:
+                            remaining_min = int(estimated_remaining // 60)
+                            remaining_sec = int(estimated_remaining % 60)
+                            status = f"음성 인식 중... [{current_time}/{self._format_time(self.audio_duration)}] - 예상 남은 시간: {remaining_min}분 {remaining_sec}초"
+                        else:
+                            status = f"음성 인식 중... [{current_time}/{self._format_time(self.audio_duration)}] - 예상 남은 시간: {int(estimated_remaining)}초"
+                    else:
+                        status = f"음성 인식 중... [{current_time}/{self._format_time(self.audio_duration)}]"
+                else:
+                    status = f"음성 인식 중... [{current_time}/{self._format_time(self.audio_duration)}]"
+            else:
+                # 오디오 길이를 모르는 경우
+                estimated_total = max(600, total_seconds * 1.2)  # 최소 10분
+                percent = min(int((total_seconds / estimated_total) * 100), 95)
+                status = f"음성 인식 중... [{current_time}]"
+
+            # 텍스트 미리보기 추가 (너무 길면 자르기)
+            if text and text.strip():
+                preview = text.strip()[:50] + "..." if len(text.strip()) > 50 else text.strip()
+                status += f" - {preview}"    
             
             self.worker.safe_emit(self.worker.progress, video_name, 40 + int(percent * 0.5), status)
             
             return True
-            
+        # 언어 감지 메시지   
         if "Detecting language" in line:
             self.worker.safe_emit(self.worker.progress, video_name, 35, "언어 감지 중...")
             return True
             
-        if "Transcription complete" in line or "Done" in line:
-            self.worker.safe_emit(self.worker.progress, video_name, 90, "음성 인식 완료")
+        # 언어 감지 결과
+        if "Detected language:" in line:
+            lang_match = re.search(r'Detected language:\s*(\w+)', line)
+            if lang_match:
+                detected_lang = lang_match.group(1)
+                self.worker.safe_emit(self.worker.progress, video_name, 38, f"감지된 언어: {detected_lang}")
+            return True
+            
+        # 완료 메시지
+        if "Transcription complete" in line or "Done" in line or "transcription finished" in line.lower():
+             self.worker.safe_emit(self.worker.progress, video_name, 90, "음성 인식 완료")
+             self.is_transcribing = False
+             return True
+            
+        # 처리 메시지들
+        if "Processing" in line or "Performing" in line:
+            # 특별한 처리 단계 감지
+            if "silence" in line.lower():
+                self.worker.safe_emit(self.worker.progress, video_name, 42, "무음 구간 처리 중...")
+            elif "speech" in line.lower():
+                self.worker.safe_emit(self.worker.progress, video_name, 45, "음성 구간 분석 중...")
+            else:
+                self.worker.safe_emit(self.worker.log, f"처리 중: {line.strip()}")
+            return True
+            
+        # 프로그레스 바 패턴 (일부 Whisper 버전)
+        progress_bar_pattern = r'(\d+)%\|'
+        bar_match = re.search(progress_bar_pattern, line)
+        if bar_match:
+            percent = int(bar_match.group(1))
+            status = f"음성 인식 처리 중... {percent}%"
+            self.worker.safe_emit(self.worker.progress, video_name, 40 + int(percent * 0.5), status)
             return True
             
         return False
+        
+    def _format_time(self, seconds):
+        """초를 MM:SS.mmm 형식으로 변환"""
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes:02d}:{secs:06.3f}"

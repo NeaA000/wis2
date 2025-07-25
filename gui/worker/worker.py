@@ -4,6 +4,7 @@
 import threading
 import traceback
 import queue
+import time
 from auto_subtitle_llama.utils import filename
 
 from .worker_base import BaseSubtitleWorker, ProgressParser
@@ -17,10 +18,22 @@ class SubtitleWorker(BaseSubtitleWorker):
         self.current_video_path = None
         self.progress_parser = ProgressParser(self)
         self.video_processor = VideoProcessor(self)
+
+        self.last_progress_update = 0
+        self.progress_throttle = 0.1  # 최소 0.1초 간격
+         
+    def safe_emit_progress(self, filename, percent, status):
+        """진행률 업데이트 throttling"""
+        current_time = time.time()
+        if current_time - self.last_progress_update >= self.progress_throttle:
+            self.safe_emit(self.progress, filename, percent, status)
+            self.last_progress_update = current_time
         
     def process_console_queue(self):
         """콘솔 큐 처리"""
         buffer = ""
+        log_counter = 0
+        log_skip_threshold = 10  # 10개마다 하나씩만 표시
         while not self.is_cancelled:
             try:
                 text = self.console_queue.get(timeout=0.1)
@@ -41,7 +54,10 @@ class SubtitleWorker(BaseSubtitleWorker):
                                 if self.progress_parser.parse_transcribe_progress(line.strip(), video_name):
                                     continue
                                     
-                                self.log.emit(line.strip())
+                                # 로그 스킵 (너무 많은 로그 방지)
+                                log_counter += 1
+                                if log_counter % log_skip_threshold == 0 or "error" in line.lower() or "warning" in line.lower():
+                                    self.log.emit(line.strip())
                             except:
                                 pass
                     buffer = lines[-1]

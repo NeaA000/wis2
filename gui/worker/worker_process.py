@@ -3,7 +3,7 @@
 """
 from auto_subtitle_llama.cli import get_audio
 
-from auto_subtitle_llama.utils import filename, write_srt, get_text_batch, replace_text_batch, LANG_CODE_MAPPER
+from auto_subtitle_llama.utils import filename, write_srt, get_text_batch, replace_text_batch, LANG_CODE_MAPPER, remove_duplicate_segments, advanced_remove_duplicates
 import whisper
 import ffmpeg
 import pickle
@@ -72,6 +72,17 @@ class VideoProcessor:
             
             if result is None or self.worker.is_cancelled:
                 return
+            # 중복 세그먼트 제거
+            original_count = len(result["segments"])
+            if self.worker.settings.get('advanced_duplicate_removal', True):
+                # 고급 중복 제거 사용
+                result["segments"] = advanced_remove_duplicates(result["segments"])
+            else:
+                # 기본 중복 제거 사용
+                result["segments"] = remove_duplicate_segments(result["segments"])
+            if original_count != len(result["segments"]):
+                self.worker.safe_emit(self.worker.log, f"중복 자막 {original_count - len(result['segments'])}개 제거됨")
+            
                 
             # 4. 자막 저장
             srt_path = self.save_subtitles(video_name, result["segments"])

@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QTextCursor
 import time
+import psutil
 
 class ProgressPanel(QWidget):
     """진행 상황 패널"""
@@ -22,6 +23,8 @@ class ProgressPanel(QWidget):
         self.current_file = None
         self.total_files = 0
         self.completed_files = 0
+        self.memory_timer = QTimer()
+        self.memory_timer.timeout.connect(self.update_memory_usage)
         self.init_ui()
         
     def init_ui(self):
@@ -67,9 +70,13 @@ class ProgressPanel(QWidget):
         time_layout = QHBoxLayout()
         self.elapsed_label = QLabel("경과 시간: 00:00")
         self.estimated_label = QLabel("예상 남은 시간: 계산 중...")
+        # 메모리 사용량 표시
+        self.memory_label = QLabel("메모리: 계산 중...")
+        self.memory_label.setStyleSheet("font-size: 12px; color: #666;")
         time_layout.addWidget(self.elapsed_label)
         time_layout.addStretch()
         time_layout.addWidget(self.estimated_label)
+        time_layout.addWidget(self.memory_label)
         
         # 로그 영역
         log_label = QLabel("처리 로그:")
@@ -127,12 +134,30 @@ class ProgressPanel(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_time)
         
+    def update_memory_usage(self):
+        """메모리 사용량 업데이트"""
+        try:
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            self.memory_label.setText(f"메모리: {memory_mb:.0f} MB")
+            
+            # 메모리 사용량이 너무 높으면 경고
+            if memory_mb > 8192:  # 8GB 이상
+                self.memory_label.setStyleSheet("font-size: 12px; color: #f44336; font-weight: bold;")
+            else:
+                self.memory_label.setStyleSheet("font-size: 12px; color: #666;")
+        except:
+            pass
+
+
+        
     def start_processing(self, total_files):
         """처리 시작"""
         self.total_files = total_files
         self.completed_files = 0
         self.start_time = time.time()
         self.timer.start(1000)  # 1초마다
+        self.memory_timer.start(2000)  # 2초마다 메모리 업데이트
         self.cancel_btn.setEnabled(True)
         self.completed_list.clear()
         self.log_text.clear()
@@ -144,6 +169,12 @@ class ProgressPanel(QWidget):
         self.current_progress.setValue(int(current_percent))
         self.current_percent_label.setText(f"{int(current_percent)}%")
         self.status_label.setText(status_message)
+
+        # 상태 메시지에 시간 정보가 있으면 강조
+        if "남은 시간:" in status_message:
+            self.status_label.setStyleSheet("color: #0d7377; font-size: 13px; font-weight: 500;")
+        else:
+            self.status_label.setStyleSheet("color: #666; font-size: 13px;")
         
         # 전체 진행률 계산
         overall_percent = (self.completed_files * 100 + current_percent) / self.total_files
@@ -153,14 +184,27 @@ class ProgressPanel(QWidget):
     def file_completed(self, filename, output_path):
         """파일 처리 완료"""
         self.completed_files += 1
-        
+        # 에러 체크
+        if output_path.startswith("ERROR:"):
+            error_msg = output_path[6:]  # "ERROR:" 제거
+            item = QListWidgetItem(f"❌ {filename} - 실패")
+            item.setData(Qt.ItemDataRole.UserRole, error_msg)
+            item.setToolTip(f"오류: {error_msg}")
+            item.setForeground(Qt.GlobalColor.red)
+        else:
+            # 성공
+            item = QListWidgetItem(f"✓ {filename}")
+            item.setData(Qt.ItemDataRole.UserRole, output_path)
+            item.setForeground(Qt.GlobalColor.darkGreen)
+            
         # 완료 목록에 추가
-        item = QListWidgetItem(f"✓ {filename}")
-        item.setData(Qt.ItemDataRole.UserRole, output_path)
         self.completed_list.addItem(item)
         
         # 로그에 추가
-        self.add_log(f"[완료] {filename} → {output_path}")
+        if output_path.startswith("ERROR:"):
+            self.add_log(f"[실패] {filename}: {output_path[6:]}")
+        else:
+            self.add_log(f"[완료] {filename} → {output_path}")
         
         # 진행률 업데이트
         if self.completed_files < self.total_files:
@@ -173,6 +217,7 @@ class ProgressPanel(QWidget):
     def finish_processing(self):
         """처리 완료"""
         self.timer.stop()
+        self.memory_timer.stop()
         self.cancel_btn.setEnabled(False)
         self.current_file_label.setText("✨ 모든 처리가 완료되었습니다!")
         self.status_label.setText(f"총 {self.completed_files}개 파일 처리 완료")
@@ -182,6 +227,14 @@ class ProgressPanel(QWidget):
         
     def add_log(self, message):
         """로그 메시지 추가"""
+
+        # 로그가 너무 많으면 오래된 것 제거
+        if self.log_text.document().lineCount() > 1000:
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.movePosition(QTextCursor.MoveOperation.Down, QTextCursor.MoveMode.KeepAnchor, 100)
+            cursor.removeSelectedText()
+
         timestamp = time.strftime("%H:%M:%S")
         self.log_text.append(f"[{timestamp}] {message}")
         # 자동 스크롤
@@ -233,6 +286,7 @@ class ProgressPanel(QWidget):
     def reset(self):
         """패널 초기화"""
         self.timer.stop()
+        self.memory_timer.stop()
         self.start_time = None
         self.current_file = None
         self.total_files = 0
