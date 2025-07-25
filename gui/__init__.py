@@ -1,6 +1,5 @@
-# GUI components
-from .drop_zone import DropZone
-from .progress_panel import ProgressPanel
-from .settings_panel import SettingsPanel
+# GUI package initialization
+from .main_window import MainWindow
 
-__all__ = ['DropZone', 'ProgressPanel', 'SettingsPanel']
+__version__ = '1.0.0'
+__all__ = ['MainWindow']

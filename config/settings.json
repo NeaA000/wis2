@@ -1,0 +1,10 @@
+{
+  "model": "medium",
+  "translate": true,
+  "languages": [
+    "en_XX",
+    "es_XX"
+  ],
+  "output_dir": "C:/Users/user/Desktop",
+  "srt_only": false
+}
