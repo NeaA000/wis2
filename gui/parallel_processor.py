@@ -60,6 +60,17 @@ class ParallelVideoProcessor:
         self.chunk_duration = chunk_duration
         self.overlap_duration = overlap_duration
         self.verbose = verbose
+        self.model_loaded = False
+        self.model_path = None
+
+    def ensure_model_downloaded(self):
+       """모델이 다운로드되었는지 확인하고 경로 반환"""
+       import whisper
+       # 모델을 다운로드만 하고 로드하지 않음
+       model_path = whisper._download(whisper._MODELS[self.model_name])
+       return model_path
+
+
         
     def get_video_duration(self, video_path: str) -> float:
         """비디오 길이 구하기"""
@@ -142,43 +153,32 @@ class ParallelVideoProcessor:
             raise
             
     def process_chunk_worker(self, chunk_queue: Queue, result_queue: Queue, 
-                       task_args: dict, worker_id: int):
-        """워커 프로세스에서 청크 처리"""
+                       task_args: dict, worker_id: int, model_path: str):
+        
 
-        # 파일 락을 사용한 모델 로드 동기화
-        model_lock_file = os.path.join(tempfile.gettempdir(), f"whisper_model_{self.model_name}.lock")
+        """워커 프로세스에서 청크 처리"""
+        # 모델 로드 (이미 다운로드된 모델 사용)
+        print(f"[Worker {worker_id}] Whisper 모델 로드 중...")
+        try:
+            # 모델이 이미 다운로드되었으므로 다시 다운로드하지 않도록 설정
+            os.environ['WHISPER_NO_DOWNLOAD'] = '1'
+       
+            # 워커별로 약간의 지연을 두어 동시 로드 방지
+            time.sleep(worker_id * 0.2)
+       
+            # 모델 로드
+            model = whisper.load_model(self.model_name)
+            print(f"[Worker {worker_id}] 모델 로드 완료")
+        except Exception as e:
+            print(f"[Worker {worker_id}] 모델 로드 실패: {e}")
+            traceback.print_exc()  # 상세한 에러 정보
+            result_queue.put({
+                'type': 'error',
+                'error': f'Worker {worker_id} 모델 로드 실패: {str(e)}'
+            })
+            return
         
-        # OS별 파일 락 처리
-        if platform.system() == "Windows":
-            import msvcrt
-            
-            with open(model_lock_file, 'w') as lock_file:
-                # Windows 파일 락
-                while True:
-                    try:
-                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                        break
-                    except:
-                        time.sleep(0.1)
-                
-                print(f"[Worker {worker_id}] Whisper 모델 로드 중...")
-                model = whisper.load_model(self.model_name)
-                
-                # 락 해제
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            # Linux/Mac
-            import fcntl
-            
-            with open(model_lock_file, 'w') as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                
-                print(f"[Worker {worker_id}] Whisper 모델 로드 중...")
-                model = whisper.load_model(self.model_name)
-                
-                # 락 자동 해제
-        
-        print(f"[Worker {worker_id}] 모델 로드 완료")
+      
         
         # 스트리밍 번역기 준비
         streaming_translator = None
@@ -444,7 +444,23 @@ class ParallelVideoProcessor:
     def process_video_parallel(self, video_path: str, audio_path: str, 
                              task_args: dict, progress_callback=None) -> dict:
         """비디오를 병렬로 처리"""
-        start_time = time.time()
+        # 0. 모델 다운로드 확인 (한 번만)
+        if progress_callback:
+            progress_callback("모델 준비 중...", 5)
+   
+        try:
+            model_path = self.ensure_model_downloaded()
+            print(f"모델 경로: {model_path}")
+        except Exception as e:
+            print(f"모델 다운로드 실패: {e}")
+            return {
+                'segments': [],
+                'language': 'unknown',
+                'processing_time': 0,
+                'num_chunks': 0,
+                'errors': [{'error': f'모델 다운로드 실패: {str(e)}'}],
+                'translations': {}
+            }
         
         # 1. 비디오를 청크로 분할
         if progress_callback:
@@ -452,6 +468,15 @@ class ParallelVideoProcessor:
             
         chunks = self.split_video_with_overlap(video_path, audio_path)
         print(f"총 {len(chunks)}개 청크로 분할됨")
+
+        # 청크 생성 확인 (디버깅용)
+        for chunk in chunks:
+            if not os.path.exists(chunk.temp_path):
+                print(f"경고: 청크 파일이 생성되지 않음: {chunk.temp_path}")
+            else:
+                file_size = os.path.getsize(chunk.temp_path)
+                print(f"청크 {chunk.index} 생성됨: {chunk.temp_path} ({file_size} bytes)")
+ 
         
         # 2. 병렬 처리를 위한 큐 설정
         chunk_queue = mp.Queue()
@@ -460,6 +485,7 @@ class ParallelVideoProcessor:
         # 청크를 큐에 추가
         for chunk in chunks:
             chunk_queue.put(chunk)
+            print(f"큐에 청크 {chunk.index} 추가됨")
             
         # 종료 신호 추가
         for _ in range(self.num_workers):
@@ -471,12 +497,14 @@ class ParallelVideoProcessor:
             
         workers = []
         for i in range(self.num_workers):
+            print(f"워커 {i} 시작 중...")
             worker = Process(
                 target=self.process_chunk_worker,
-                args=(chunk_queue, result_queue, task_args, i)
+                args=(chunk_queue, result_queue, task_args, i, model_path)
             )
             worker.start()
             workers.append(worker)
+            print(f"워커 {i} 시작됨 (PID: {worker.pid})")
             
         # 4. 결과 수집
         results = []

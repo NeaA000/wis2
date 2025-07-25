@@ -192,7 +192,7 @@ def translates(translate_to: str, text_batch: List[str], max_batch_size: int = N
            forced_bos_token_id=tokenizer.lang_code_to_id[translate_to],
            max_length=256,
            num_beams=2,  # 속도 우선
-           early_stopping=True,
+           #early_stopping=True,
            no_repeat_ngram_size=3,
            use_cache=True
        )

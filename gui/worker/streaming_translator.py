@@ -208,7 +208,7 @@ class StreamingTranslator:
                 forced_bos_token_id=self.tokenizer.lang_code_to_id[target_lang],
                 max_length=128,
                 num_beams=1,  # 속도 우선
-                early_stopping=True,
+                #early_stopping=True,
                 do_sample=False
             )
             
