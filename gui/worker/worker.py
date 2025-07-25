@@ -127,6 +127,7 @@ class SubtitleWorker(BaseSubtitleWorker):
                     self.progress_parser.streaming_translator = None
                     
             if not self.is_cancelled:
+                self.safe_emit(self.log, f"✓ 모든 비디오 처리 완료")
                 self.safe_emit(self.finished)
             
         except Exception as e:

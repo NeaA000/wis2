@@ -362,11 +362,12 @@ class VideoProcessor:
         task_args = {
             'task': 'transcribe',
             'language': detected_lang,
-            'realtime_translation': self.worker.realtime_translation_enabled  # 실시간 번역 플래그 추가
+            'realtime_translation': self.worker.realtime_translation_enabled,  # 실시간 번역 플래그 추가
+            'realtime_log': self.worker.settings.get('realtime_log', True)  # 실시간 로그 설정 추가
         }
         
         # 병렬 처리에서도 번역하도록 설정 (실시간이 아닌 경우)
-        if self.worker.settings.get('translate') and self.worker.settings.get('languages') and not self.worker.realtime_translation_enabled:
+        if self.worker.settings.get('translate') and self.worker.settings.get('languages'):
             # mBART 소스 언어 코드
             current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
             source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"

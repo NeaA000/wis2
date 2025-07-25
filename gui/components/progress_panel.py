@@ -388,8 +388,14 @@ class ProgressPanel(QWidget):
         timestamp = f"[{self._format_time(segment['start'])} --> {self._format_time(segment['end'])}]"
         
         # HTML 형식으로 표시 (색상 구분)
+        # 워커 정보 추가 (병렬 처리 시)
+        worker_info = ""
+        if hasattr(segment, 'worker_id'):
+            worker_info = f'<span style="color: #888;">[Worker {segment.worker_id}]</span> '
+  
         html = f'''
         <div style="margin-bottom: 8px;">
+            {worker_info}
             <span style="color: #4CAF50;">{timestamp}</span> 
             <span style="color: #ffffff;">{segment['text']}</span><br>
             <span style="color: #888;">└─ {language}:</span> 

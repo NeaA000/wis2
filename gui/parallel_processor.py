@@ -182,13 +182,15 @@ class ParallelVideoProcessor:
         
         # 스트리밍 번역기 준비
         streaming_translator = None
-        if task_args.get('translate_languages'):
+        if task_args.get('translate_languages') and task_args.get('realtime_translation', False):
+        
             try:
                 from gui.worker.streaming_translator import StreamingTranslator
                 
                 # 번역 결과 콜백
                 def translation_callback(result):
                     result['worker_id'] = worker_id
+                    result['chunk_index'] = chunk_info.index if 'chunk_info' in locals() else None
                     result_queue.put(result)
                 
                 streaming_translator = StreamingTranslator(
@@ -205,7 +207,7 @@ class ParallelVideoProcessor:
         
         # 기존 번역기 (폴백용)
         translator = None
-        if task_args.get('translate_languages') and not streaming_translator:
+        if task_args.get('translate_languages') and not task_args.get('realtime_translation', False):
             from gui.worker.parallel_translator import ParallelTranslator
             # 워커용 더미 객체 (safe_emit 등을 위해)
             class WorkerProxy:
@@ -293,7 +295,9 @@ class ParallelVideoProcessor:
                             absolute_segment = {
                                 'start': self.chunk_start + start_time,
                                 'end': self.chunk_start + end_time,
-                                'text': subtitle_text
+                                'text': subtitle_text,
+                                'text': subtitle_text,
+                                'worker_id': self.worker_id  # 워커 ID 추가
                             }
                             
                             # 진행률 업데이트 (더 자세한 정보 포함)
@@ -380,18 +384,18 @@ class ParallelVideoProcessor:
             
                 # 번역 처리 (스트리밍 번역이 실패했거나 없는 경우)
                 translations = {}
-                if translator and task_args.get('translate_languages'):
-                   if streaming_translator:
-                       # 스트리밍 번역 결과 가져오기
-                       streaming_translator.flush_all()  # 남은 버퍼 처리
-                       translations = streaming_translator.get_results()
-                       result_queue.put({
-                           'type': 'log',
-                           'message': f"[Worker {worker_id}] 스트리밍 번역 완료: {len(translations)}개 언어"
-                       })
-                   else:
-                       # 기존 병렬 번역 사용
-                    
+                if task_args.get('translate_languages'):
+                    if streaming_translator and task_args.get('realtime_translation', False):
+                        # 스트리밍 번역 결과 가져오기
+                        streaming_translator.flush_all()  # 남은 버퍼 처리
+                        translations = streaming_translator.get_results()
+                        result_queue.put({
+                            'type': 'log',
+                            'message': f"[Worker {worker_id}] 스트리밍 번역 완료: {len(translations)}개 언어"
+                        })
+                    elif translator:
+                        # 기존 병렬 번역 사용
+                        
                         # 청크별 번역 실행
                         source_lang = task_args.get('source_lang', 'en_XX')
                         translations = translator.translate_for_chunk(

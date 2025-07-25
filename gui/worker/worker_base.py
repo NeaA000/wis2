@@ -138,7 +138,7 @@ class ProgressParser:
                     result['translation']
                 )
                 # 로그에도 표시
-                if not result.get('from_cache'):
+                if not result.get('from_cache') and self.worker.settings.get('realtime_log', True):
                     self.worker.safe_emit(
                         self.worker.log,
                         f"[실시간 번역] {result['language']}: {result['translation'][:50]}..."

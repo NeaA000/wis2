@@ -217,6 +217,10 @@ class StreamingTranslator:
             # 캐시에 저장
             self._save_to_cache(segment.text, target_lang, translation)
 
+            # 워커 정보 추가 (있는 경우)
+            if hasattr(segment, 'worker_id'):
+                segment.__dict__['worker_id'] = segment.worker_id
+
             # 결과 저장
             with self.results_lock:
               self.translation_results[target_lang].append({
