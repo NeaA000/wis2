@@ -14,6 +14,7 @@ import time
 import traceback
 from dataclasses import dataclass
 import threading
+import sys
 import re
 
 # utils 함수들 import (수정됨)
@@ -139,87 +140,98 @@ class ParallelVideoProcessor:
             raise
             
     def process_chunk_worker(self, chunk_queue: Queue, result_queue: Queue, 
-                           task_args: dict, worker_id: int):
+                       task_args: dict, worker_id: int):
         """워커 프로세스에서 청크 처리"""
+
         # 각 워커에서 모델 로드
         print(f"[Worker {worker_id}] Whisper 모델 로드 중...")
         model = whisper.load_model(self.model_name)
         print(f"[Worker {worker_id}] 모델 로드 완료")
-        
+    
         while True:
             try:
-                 # 취소 확인 추가
+                # 취소 확인 추가
                 if hasattr(threading.current_thread(), 'cancel_event'):
                     if threading.current_thread().cancel_event.is_set():
                         break
-                        
+                    
                 chunk_info = chunk_queue.get(timeout=1)
 
                 if chunk_info is None:  # 종료 신호
                     break
-                    
-                print(f"[Worker {worker_id}] 청크 {chunk_info.index} 처리 시작")
                 
+                print(f"[Worker {worker_id}] 청크 {chunk_info.index} 처리 시작")
+            
                 # 진행률 추정을 위한 시작 시간
                 start_time = time.time()
-                
-                # 청크 길이에 따른 예상 처리 시간 (대략적)
-                # 일반적으로 Whisper는 실시간의 5-10배 속도로 처리
-                estimated_duration = chunk_info.duration / 1.1  # 5배속 가정
-                
-                # 주기적으로 진행률 업데이트
-                def update_progress():
-                    elapsed = time.time() - start_time
-                    progress = min(int((elapsed / estimated_duration) * 95), 95)  # 최대 95%
+
+                # Whisper 진행률 캡처를 위한 클래스
+                class ProgressCapture:
+                    def __init__(self, worker_id, chunk_index, result_queue):
+                        self.worker_id = worker_id
+                        self.chunk_index = chunk_index
+                        self.result_queue = result_queue
+                        self.last_progress = 0
                     
-                    result_queue.put({
-                        'type': 'worker_progress',
-                        'worker_id': worker_id,
-                        'chunk_index': chunk_info.index,
-                        'progress': progress,
-                        'status': f"처리 중... ({elapsed:.1f}초)"
-                    })
+                    def write(self, text):
+                        # Whisper 진행률 파싱 (46%|████... 형태)
+                        match = re.search(r'(\d+)%\|', text)
+                        if match:
+                            progress = int(match.group(1))
+                            if progress != self.last_progress:
+                                self.last_progress = progress
+                                # 실제 진행률 전송
+                                self.result_queue.put({
+                                    'type': 'worker_progress',
+                                    'worker_id': self.worker_id,
+                                    'chunk_index': self.chunk_index,
+                                    'progress': progress,
+                                    'status': f"음성 인식 중... {progress}%"
+                                })
+                    
+                        # 원래 출력도 유지
+                        sys.__stdout__.write(text)
+                    
+                    def flush(self):
+                        sys.__stdout__.flush()
+            
+                # stdout 리다이렉트
+                progress_capture = ProgressCapture(worker_id, chunk_info.index, result_queue)
+                old_stdout = sys.stdout
+                old_stderr = sys.stderr
+            
+                try:
+                    sys.stdout = progress_capture
+                    sys.stderr = progress_capture
                 
-                # 백그라운드 스레드로 진행률 업데이트
-                progress_stop = threading.Event()
-                
-                def progress_updater():
-                    while not progress_stop.is_set():
-                        update_progress()
-                        time.sleep(2)  # 2초마다 업데이트
-                
-                progress_thread = threading.Thread(target=progress_updater)
-                progress_thread.daemon = True
-                progress_thread.start()
-                
-                # Whisper로 음성 인식 (verbose=False로 변경)
-                result = model.transcribe(
-                    chunk_info.temp_path,
-                    task=task_args.get('task', 'transcribe'),
-                    language=task_args.get('language'),
-                    verbose=False,  # False로 변경
-                    fp16=False  # CPU에서는 FP32 사용
-                )
-                
-                # 진행률 업데이트 중지
-                progress_stop.set()
-                progress_thread.join(timeout=1)
-                
+                    # Whisper로 음성 인식
+                    result = model.transcribe(
+                        chunk_info.temp_path,
+                        task=task_args.get('task', 'transcribe'),
+                        language=task_args.get('language'),
+                        verbose=True,  # True로 변경
+                        fp16=False
+                    )
+                finally:
+                    # stdout 복원
+                    sys.stdout = old_stdout
+                    sys.stderr = old_stderr
+            
                 # 타임스탬프 조정 (utils 함수 사용)
                 adjusted_segments = adjust_timestamps(
                     result['segments'], 
                     chunk_info.start_time
                 )
-                
+            
                 # 완료 시 100% 전송
                 result_queue.put({
                     'type': 'worker_progress',
                     'worker_id': worker_id,
                     'chunk_index': chunk_info.index,
                     'progress': 100,
-                    'status': '완료'
+                    'status': '음성 인식 완료'
                 })
-                
+            
                 # 결과 전송
                 result_queue.put({
                     'type': 'result',
@@ -227,9 +239,9 @@ class ParallelVideoProcessor:
                     'segments': adjusted_segments,
                     'language': result.get('language', task_args.get('language'))
                 })
-                
+            
                 print(f"[Worker {worker_id}] 청크 {chunk_info.index} 완료")
-                
+            
             except Exception as e:
                 print(f"[Worker {worker_id}] 오류: {e}")
                 traceback.print_exc()
