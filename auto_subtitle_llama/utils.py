@@ -1,5 +1,6 @@
 import os
 from typing import Iterator, TextIO, List
+import threading
 
 LANG_CODE_MAPPER = {
     "en": ["english", "en_XX"],
@@ -54,35 +55,6 @@ LANG_CODE_MAPPER = {
     "tl": ["tagalog", "tl_XX"],
 }
 
-# Whisper 언어 코드 → mBART 언어 코드 매핑
-WHISPER_TO_MBART_LANG_CODE = {
-    "en": "en_XX",
-    "zh": "zh_CN",
-    "de": "de_DE",
-    "es": "es_XX",
-    "ru": "ru_RU",
-    "ko": "ko_KR",
-    "fr": "fr_XX",
-    "ja": "ja_XX",
-    "pt": "pt_XX",
-    "tr": "tr_TR",
-    "pl": "pl_PL",
-    "it": "it_IT",
-    "nl": "nl_XX",
-    "ar": "ar_AR",
-    "sv": "sv_SE",
-    "id": "id_ID",
-    "hi": "hi_IN",
-    "fi": "fi_FI",
-    "vi": "vi_VN",
-    "he": "he_IL",
-    "uk": "uk_UA",
-    "cs": "cs_CZ",
-    "ro": "ro_RO",
-    "ta": "ta_IN",
-    "th": "th_TH",
-}
-
 
 def str2bool(string):
     string = string.lower()
@@ -126,6 +98,36 @@ def write_srt(transcript: Iterator[dict], file: TextIO):
 
 def filename(path):
     return os.path.splitext(os.path.basename(path))[0]
+
+class TranslatorManager:
+    """번역 모델 싱글톤 매니저"""
+    _instance = None
+    _lock = threading.Lock()
+    _model = None
+    _tokenizer = None
+    
+    def __new__(cls):
+        if not cls._instance:
+            with cls._lock:
+                if not cls._instance:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def get_translator(self):
+        """번역 모델과 토크나이저 반환"""
+        if self._model is None:
+            with self._lock:
+                if self._model is None:
+                    self._load_model()
+        return self._model, self._tokenizer
+    
+    def _load_model(self):
+        """모델 로드 (한 번만 실행)"""
+        print("Loading translation model... (this may take a while)")
+        from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
+        self._model = MBartForConditionalGeneration.from_pretrained("SnypzZz/Llama2-13b-Language-translate")
+        self._tokenizer = MBart50TokenizerFast.from_pretrained("SnypzZz/Llama2-13b-Language-translate", src_lang="en_XX")
+        print("Translation model loaded successfully!")
 
 
 def load_translator(source_lang="en_XX"):

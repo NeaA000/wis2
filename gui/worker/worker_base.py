@@ -9,6 +9,7 @@ import os
 import hashlib
 import re
 import time
+import signal
 
 class BaseSubtitleWorker(QThread):
     """Worker 기본 클래스 - 공통 기능 제공"""
@@ -29,6 +30,8 @@ class BaseSubtitleWorker(QThread):
         self.console_thread = None
         self.original_stdout = sys.stdout
         self.original_stderr = sys.stderr
+        self.cancel_event = threading.Event()
+        self.active_threads = []
         
     def safe_emit(self, signal, *args):
         """안전하게 시그널 발생"""
@@ -51,6 +54,7 @@ class BaseSubtitleWorker(QThread):
     def cancel(self):
         """작업 취소"""
         self.is_cancelled = True
+        self.cancel_event.set()
         self.safe_emit(self.log, "작업 취소 중...")
         
     # 콘솔 출력 관련 메서드들

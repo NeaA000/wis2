@@ -1,7 +1,7 @@
 """
 비디오 처리 관련 로직
 """
-from auto_subtitle_llama.cli import get_audio, translates
+from auto_subtitle_llama.cli import get_audio
 
 from auto_subtitle_llama.utils import filename, write_srt, get_text_batch, replace_text_batch, LANG_CODE_MAPPER
 import whisper
@@ -12,6 +12,7 @@ import copy
 import time
 import tempfile
 import traceback
+import threading
 
 class VideoProcessor:
     """비디오 처리 전담 클래스"""
@@ -124,6 +125,9 @@ class VideoProcessor:
         _, probs = self.model.detect_language(mel)
         detected_lang = max(probs, key=probs.get)
         self.worker.safe_emit(self.worker.log, f"감지된 언어: {detected_lang}")
+
+        if self.worker.is_cancelled:
+            return None, None
         
         # 음성 인식
         self.worker.safe_emit(self.worker.progress, video_name, 40, "음성 인식 시작...")
@@ -133,16 +137,39 @@ class VideoProcessor:
         self.worker.progress_parser.transcribe_start_time = time.time()
         
         result = None
+        transcribe_thread = None
         try:
-            result = self.model.transcribe(
-                audio_path,
-                task="transcribe",
-                language=detected_lang,
-                verbose=True,
-                fp16=False
-            )
+           # 취소 가능한 transcribe 구현
+            def transcribe_task():
+                nonlocal result
+                try:
+                    result = self.model.transcribe(
+                        audio_path,
+                        task="transcribe",
+                        language=detected_lang,  # 이제 detected_lang가 정의됨
+                        verbose=True,
+                        fp16=False
+                    )
+                except Exception as e:
+                    if not self.worker.is_cancelled:
+                        self.worker.safe_emit(self.worker.log, f"❌ 음성 인식 오류: {str(e)}")
+            
+            transcribe_thread = threading.Thread(target=transcribe_task)
+            self.worker.active_threads.append(transcribe_thread)
+            transcribe_thread.start()
+
+            # 주기적으로 취소 확인
+            while transcribe_thread.is_alive() and not self.worker.is_cancelled:
+                transcribe_thread.join(timeout=0.5)
+                
+            if self.worker.is_cancelled and transcribe_thread.is_alive():
+                # 강제 종료는 하지 않고 완료 대기 (최대 5초)
+                transcribe_thread.join(timeout=5.0)
+            
         finally:
             self.worker.progress_parser.is_transcribing = False
+            if transcribe_thread and transcribe_thread in self.worker.active_threads:  
+                self.worker.active_threads.remove(transcribe_thread)
             
         return result, detected_lang
         
@@ -192,6 +219,13 @@ class VideoProcessor:
         video_name = filename(video_path)
         total_langs = len(self.worker.settings['languages'])
 
+        # 번역 모듈 임포트 (지연 로딩)
+        try:
+            from auto_subtitle_llama.cli import translates
+        except ImportError:
+            self.worker.safe_emit(self.worker.log, "❌ 번역 모듈 로드 실패")
+            return
+
          # mBART 소스 언어 코드 가져오기
         current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
         source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
@@ -231,7 +265,12 @@ class VideoProcessor:
                 
                 # 텍스트 배치 추출 및 번역
                 text_batch = get_text_batch(translated_segments)
-                translated_batch = translates(target_lang, text_batch, source_lang=source_mbart_code)
+                # 번역 실행 (싱글톤 모델 사용)
+                translated_batch = translates(
+                    translate_to=target_lang, 
+                    text_batch=text_batch, 
+                    source_lang=source_mbart_code
+                )
                 
                 if self.worker.is_cancelled:
                     break

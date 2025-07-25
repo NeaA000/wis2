@@ -7,6 +7,7 @@ import tempfile
 from .utils import LANG_CODE_MAPPER, WHISPER_TO_MBART_LANG_CODE, str2bool, format_timestamp, write_srt, filename, load_translator, get_text_batch, replace_text_batch
 from typing import List, Tuple
 from tqdm import tqdm
+from .utils import TranslatorManager
 
 # Uncomment below and comment "from .utils import *", if executing cli.py directly
 # import sys
@@ -155,8 +156,13 @@ def get_subtitles(audio_paths: list, output_srt: bool, output_dir: str, model:wh
 
     return subtitles_path, detected_language
 
-def translates(translate_to: str, text_batch: List[str], source_lang: str = "en_XX", max_batch_size: int = 32):
-    model, tokenizer = load_translator(source_lang)
+def translates(translate_to: str, text_batch: List[str], max_batch_size: int = 32, source_lang: str = "en_XX"):
+    # 싱글톤 매니저에서 모델 가져오기
+    translator_manager = TranslatorManager()
+    model, tokenizer = translator_manager.get_translator()
+    
+    # 소스 언어 설정
+    tokenizer.src_lang = source_lang
 
     # 토크나이저 소스 언어 명시적 설정
     tokenizer.src_lang = source_lang

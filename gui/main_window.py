@@ -375,6 +375,15 @@ class MainWindow(QMainWindow):
                     self.cleanup_worker()
                 
                 event.accept()
+
+                # 번역 모델 정리
+                try:
+                    from auto_subtitle_llama.utils import TranslatorManager
+                    manager = TranslatorManager()
+                    manager._model = None
+                    manager._tokenizer = None
+                except:
+                    pass
             else:
                 event.ignore()
         else:
