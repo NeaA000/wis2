@@ -444,6 +444,8 @@ class ParallelVideoProcessor:
     def process_video_parallel(self, video_path: str, audio_path: str, 
                              task_args: dict, progress_callback=None) -> dict:
         """비디오를 병렬로 처리"""
+
+        start_time = time.time()
         # 0. 모델 다운로드 확인 (한 번만)
         if progress_callback:
             progress_callback("모델 준비 중...", 5)
