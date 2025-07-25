@@ -236,6 +236,9 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self.on_error)
         self.worker.log.connect(self.progress_panel.add_log)
         
+        # 실시간 번역 시그널 연결 (새로 추가)
+        self.worker.realtimeTranslation.connect(self.progress_panel.show_realtime_translation)
+        
         # Worker 종료 시 정리
         self.worker.finished.connect(self.cleanup_worker)
         
@@ -342,6 +345,7 @@ class MainWindow(QMainWindow):
                 self.worker.finished.disconnect()
                 self.worker.error.disconnect()
                 self.worker.log.disconnect()
+                self.worker.realtimeTranslation.disconnect()  # 추가
             except:
                 pass
             

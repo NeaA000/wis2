@@ -1,6 +1,7 @@
 """
 병렬 비디오 처리를 위한 모듈
 긴 영상을 청크로 분할하여 병렬 처리하고 결과를 병합
+실시간 스트리밍 번역 기능 추가
 """
 import os
 import tempfile
@@ -179,9 +180,32 @@ class ParallelVideoProcessor:
         
         print(f"[Worker {worker_id}] 모델 로드 완료")
         
-        # 번역이 필요한 경우 번역기 준비
-        translator = None
+        # 스트리밍 번역기 준비
+        streaming_translator = None
         if task_args.get('translate_languages'):
+            try:
+                from gui.worker.streaming_translator import StreamingTranslator
+                
+                # 번역 결과 콜백
+                def translation_callback(result):
+                    result['worker_id'] = worker_id
+                    result_queue.put(result)
+                
+                streaming_translator = StreamingTranslator(
+                    target_languages=task_args['translate_languages'],
+                    source_lang=task_args.get('source_lang', 'ko_KR'),
+                    callback=translation_callback,
+                    buffer_size=1  # 즉시 번역
+                )
+                print(f"[Worker {worker_id}] 스트리밍 번역기 준비 완료")
+            except Exception as e:
+                print(f"[Worker {worker_id}] 스트리밍 번역기 초기화 실패: {e}")
+                # 스트리밍 번역이 실패해도 계속 진행
+                streaming_translator = None
+        
+        # 기존 번역기 (폴백용)
+        translator = None
+        if task_args.get('translate_languages') and not streaming_translator:
             from gui.worker.parallel_translator import ParallelTranslator
             # 워커용 더미 객체 (safe_emit 등을 위해)
             class WorkerProxy:
@@ -214,42 +238,120 @@ class ParallelVideoProcessor:
                     break
                 
                 print(f"[Worker {worker_id}] 청크 {chunk_info.index} 처리 시작")
+                print(f"  시간 범위: {format_timestamp(chunk_info.start_time)} ~ {format_timestamp(chunk_info.end_time)}")
+                print(f"  청크 길이: {chunk_info.duration}초")
             
                 # 진행률 추정을 위한 시작 시간
                 start_time = time.time()
 
                 # Whisper 진행률 캡처를 위한 클래스
                 class ProgressCapture:
-                    def __init__(self, worker_id, chunk_index, result_queue):
+                    def __init__(self, worker_id, chunk_index, result_queue, chunk_info, streaming_translator=None):
                         self.worker_id = worker_id
                         self.chunk_index = chunk_index
                         self.result_queue = result_queue
                         self.last_progress = 0
+                        self.streaming_translator = streaming_translator
+                        
+                        # 청크 정보 저장
+                        self.chunk_info = chunk_info
+                        self.chunk_start = chunk_info.start_time
+                        self.chunk_end = chunk_info.end_time
+                        self.chunk_duration = chunk_info.end_time - chunk_info.start_time
+                        
+                        # 진행률 추적
+                        self.last_timestamp = 0
+                        self.segments_count = 0
                     
                     def write(self, text):
-                        # Whisper 진행률 파싱 (46%|████... 형태)
-                        match = re.search(r'(\d+)%\|', text)
-                        if match:
-                            progress = int(match.group(1))
-                            if progress != self.last_progress:
-                                self.last_progress = progress
-                                # 실제 진행률 전송
-                                self.result_queue.put({
-                                    'type': 'worker_progress',
-                                    'worker_id': self.worker_id,
-                                    'chunk_index': self.chunk_index,
-                                    'progress': progress,
-                                    'status': f"음성 인식 중... {progress}%"
-                                })
-                    
+                        # 기존 Whisper 진행률 파싱 (백업용)
+                        progress_match = re.search(r'(\d+)%\|', text)
+                        if progress_match:
+                            # 타임스탬프 기반 진행률이 우선
+                            pass
+                        
+                        # Whisper 자막 출력 파싱
+                        # 패턴: [00:00.000 --> 00:02.000] 텍스트
+                        timestamp_pattern = r'\[(\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}\.\d{3})\]\s*(.+)?'
+                        subtitle_match = re.search(timestamp_pattern, text)
+                        
+                        if subtitle_match and subtitle_match.group(3):
+                            # 타임스탬프 파싱 (청크 내 상대 시간)
+                            start_time = self._parse_timestamp(subtitle_match.group(1))
+                            end_time = self._parse_timestamp(subtitle_match.group(2))
+                            subtitle_text = subtitle_match.group(3).strip()
+                            
+                            # 청크 내 진행률 계산
+                            progress_in_chunk = (end_time / self.chunk_duration) * 100
+                            progress_in_chunk = min(progress_in_chunk, 99)  # 최대 99%
+                            
+                            # 마지막 타임스탬프 업데이트
+                            self.last_timestamp = end_time
+                            self.segments_count += 1
+                            
+                            # 절대 시간으로 변환 (전체 비디오 기준)
+                            absolute_segment = {
+                                'start': self.chunk_start + start_time,
+                                'end': self.chunk_start + end_time,
+                                'text': subtitle_text
+                            }
+                            
+                            # 진행률 업데이트 (더 자세한 정보 포함)
+                            self.result_queue.put({
+                                'type': 'worker_progress',
+                                'worker_id': self.worker_id,
+                                'chunk_index': self.chunk_index,
+                                'progress': int(progress_in_chunk),
+                                'status': f"음성 인식 중... [{self._format_time(end_time)}/{self._format_time(self.chunk_duration)}]",
+                                'current_time': end_time,
+                                'total_time': self.chunk_duration,
+                                'segments_count': self.segments_count
+                            })
+                            
+                            # 실시간 자막 표시
+                            self.result_queue.put({
+                                'type': 'realtime_subtitle',
+                                'worker_id': self.worker_id,
+                                'chunk_index': self.chunk_index,
+                                'segment': absolute_segment,
+                                'relative_time': end_time,  # 청크 내 상대 시간
+                                'progress': progress_in_chunk
+                            })
+                            
+                            # 스트리밍 번역
+                            if self.streaming_translator:
+                                try:
+                                    self.streaming_translator.process_segment(absolute_segment)
+                                except Exception as e:
+                                    print(f"[Worker {self.worker_id}] 스트리밍 번역 오류: {e}")
+                        
                         # 원래 출력도 유지
                         sys.__stdout__.write(text)
                     
                     def flush(self):
                         sys.__stdout__.flush()
+                    
+                    def _parse_timestamp(self, timestamp_str):
+                        """MM:SS.mmm 형식을 초 단위로 변환"""
+                        parts = timestamp_str.split(':')
+                        minutes = int(parts[0])
+                        seconds = float(parts[1])
+                        return minutes * 60 + seconds
+                    
+                    def _format_time(self, seconds):
+                        """초를 MM:SS 형식으로 변환"""
+                        minutes = int(seconds // 60)
+                        secs = int(seconds % 60)
+                        return f"{minutes:02d}:{secs:02d}"
             
                 # stdout 리다이렉트
-                progress_capture = ProgressCapture(worker_id, chunk_info.index, result_queue)
+                progress_capture = ProgressCapture(
+                    worker_id, 
+                    chunk_info.index, 
+                    result_queue, 
+                    chunk_info,
+                    streaming_translator
+                )
                 old_stdout = sys.stdout
                 old_stderr = sys.stderr
             
@@ -264,7 +366,6 @@ class ParallelVideoProcessor:
                         language=task_args.get('language'),
                         verbose=True,  # True로 변경
                         fp16=False,
-                        
                     )
                 finally:
                     # stdout 복원
@@ -277,9 +378,9 @@ class ParallelVideoProcessor:
                     chunk_info.start_time
                 )
             
-                # 번역 처리
+                # 번역 처리 (스트리밍 번역이 실패했거나 없는 경우)
                 translations = {}
-                if translator and task_args.get('translate_languages'):
+                if translator and task_args.get('translate_languages') and not streaming_translator:
                     result_queue.put({
                         'type': 'worker_progress',
                         'worker_id': worker_id,
@@ -326,6 +427,13 @@ class ParallelVideoProcessor:
                     'error': str(e)
                 })
         
+        # 스트리밍 번역기 정리
+        if streaming_translator:
+            try:
+                streaming_translator.stop()
+            except:
+                pass
+        
     def process_video_parallel(self, video_path: str, audio_path: str, 
                              task_args: dict, progress_callback=None) -> dict:
         """비디오를 병렬로 처리"""
@@ -368,6 +476,9 @@ class ParallelVideoProcessor:
         errors = []
         processed = 0
         
+        # 실시간 번역 결과 저장 (임시)
+        realtime_translations = {}
+        
         while processed < len(chunks):
             result = result_queue.get()
             
@@ -376,6 +487,38 @@ class ParallelVideoProcessor:
                 # 워커 진행률은 progress_callback으로 전달
                 if progress_callback:
                     progress_callback(result, 0)  # 진행률 데이터 전달
+                    
+            elif result.get('type') == 'realtime_subtitle':
+                # 실시간 자막 표시
+                if progress_callback:
+                    progress_callback({
+                        'type': 'realtime_subtitle',
+                        'worker_id': result['worker_id'],
+                        'chunk_index': result['chunk_index'],
+                        'segment': result['segment'],
+                        'progress': result.get('progress', 0)
+                    }, 0)
+                    
+            elif result.get('type') == 'translation':
+                # 실시간 번역 결과
+                if progress_callback:
+                    progress_callback({
+                        'type': 'realtime_translation',
+                        'worker_id': result.get('worker_id'),
+                        'segment': result['segment'],
+                        'language': result['language'],
+                        'translation': result['translation']
+                    }, 0)
+                # 임시 저장 (최종 결과와 병합용)
+                lang = result['language']
+                if lang not in realtime_translations:
+                    realtime_translations[lang] = []
+                realtime_translations[lang].append({
+                    'start': result['segment']['start'],
+                    'end': result['segment']['end'],
+                    'text': result['translation']
+                })
+                    
             elif result.get('type') == 'log':
                 # 로그 메시지 전달
                 if progress_callback:
@@ -407,6 +550,14 @@ class ParallelVideoProcessor:
         
         # 오버랩 부분 병합
         merged_segments, merged_translations = self.merge_overlapping_results(results)
+        
+        # 실시간 번역 결과가 있으면 병합
+        if realtime_translations:
+            for lang, segments in realtime_translations.items():
+                if lang not in merged_translations:
+                    # 정렬 후 병합
+                    segments.sort(key=lambda x: x['start'])
+                    merged_translations[lang] = merge_overlapping_segments(segments)
         
         # 7. 임시 파일 정리
         if progress_callback:

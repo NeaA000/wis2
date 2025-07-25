@@ -6,7 +6,7 @@ import traceback
 import queue
 import time
 from PyQt6.QtCore import pyqtSignal
-from auto_subtitle_llama.utils import filename
+from auto_subtitle_llama.utils import filename, LANG_CODE_MAPPER
 
 from .worker_base import BaseSubtitleWorker, ProgressParser
 from .worker_process import VideoProcessor
@@ -26,6 +26,10 @@ class SubtitleWorker(BaseSubtitleWorker):
 
         self.last_progress_update = 0
         self.progress_throttle = 0.1  # 최소 0.1초 간격
+        
+        # 실시간 번역 설정 확인
+        self.realtime_translation_enabled = settings.get('realtime_translation', True)
+        self.translation_results = {}  # 실시간 번역 결과 저장
          
     def safe_emit_progress(self, filename, percent, status):
         """진행률 업데이트 throttling"""
@@ -94,7 +98,33 @@ class SubtitleWorker(BaseSubtitleWorker):
                     break
                     
                 self.current_video_path = video_path
+                
+                # 실시간 번역이 활성화되고 번역 언어가 설정된 경우
+                if (self.realtime_translation_enabled and 
+                    self.settings.get('translate') and 
+                    self.settings.get('languages')):
+                    
+                    # 현재 비디오의 언어 감지 (캐시에서 가져오거나 새로 감지)
+                    detected_lang = self.video_processor.detect_language(video_path)
+                    if detected_lang:
+                        # mBART 소스 언어 코드
+                        current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
+                        source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
+                        
+                        # 실시간 번역기 초기화
+                        self.progress_parser.init_streaming_translator(
+                            self.settings['languages'],
+                            source_mbart_code
+                        )
+                        self.safe_emit(self.log, f"실시간 번역 모드로 처리 시작 ({detected_lang} → {', '.join(self.settings['languages'])})")
+                
+                # 비디오 처리
                 self.video_processor.process_video(video_path, idx, len(self.video_paths))
+                
+                # 실시간 번역기 정지 및 통계
+                if self.progress_parser.streaming_translator:
+                    self.progress_parser.stop_streaming_translator()
+                    self.progress_parser.streaming_translator = None
                     
             if not self.is_cancelled:
                 self.safe_emit(self.finished)
@@ -107,6 +137,10 @@ class SubtitleWorker(BaseSubtitleWorker):
             # 정리 작업
             self.cleanup()
             self.video_processor.cleanup_temp_files()
+            
+            # 실시간 번역기 정리
+            if self.progress_parser.streaming_translator:
+                self.progress_parser.stop_streaming_translator()
             
     def cleanup(self):
         """정리 작업 - 부모 클래스 메서드 확장"""

@@ -20,6 +20,8 @@ class BaseSubtitleWorker(QThread):
     finished = pyqtSignal()
     error = pyqtSignal(str)
     log = pyqtSignal(str)
+    # 실시간 번역 시그널 추가
+    realtimeTranslation = pyqtSignal(dict, str, str)  # segment, language, translation
     
     def __init__(self, video_paths, settings):
         super().__init__()
@@ -105,7 +107,7 @@ class BaseSubtitleWorker(QThread):
 
 
 class ProgressParser:
-    """진행률 파싱 전용 클래스"""
+    """진행률 파싱 전용 클래스 - 실시간 번역 기능 추가"""
     
     def __init__(self, worker):
         self.worker = worker
@@ -116,6 +118,58 @@ class ProgressParser:
         self.last_timestamp = 0
         self.total_segments = 0
         self.processed_segments = 0
+        self.streaming_translator = None
+        self.detected_segments = []  # 감지된 세그먼트 저장
+        
+    def init_streaming_translator(self, target_languages, source_lang):
+        """스트리밍 번역기 초기화"""
+        if not target_languages:
+            return
+            
+        from gui.worker.streaming_translator import StreamingTranslator
+        
+        def translation_callback(result):
+            """번역 결과 콜백"""
+            if result['type'] == 'translation':
+                self.worker.safe_emit(
+                    self.worker.realtimeTranslation,
+                    result['segment'].__dict__,  # dataclass를 dict로 변환
+                    result['language'],
+                    result['translation']
+                )
+                # 로그에도 표시
+                if not result.get('from_cache'):
+                    self.worker.safe_emit(
+                        self.worker.log,
+                        f"[실시간 번역] {result['language']}: {result['translation'][:50]}..."
+                    )
+            elif result['type'] == 'error':
+                self.worker.safe_emit(
+                    self.worker.log,
+                    f"[번역 오류] {result['language']}: {result['error']}"
+                )
+        
+        self.streaming_translator = StreamingTranslator(
+            target_languages=target_languages,
+            source_lang=source_lang,
+            callback=translation_callback,
+            buffer_size=1,  # 실시간 모드
+            max_workers=len(target_languages),  # 언어별 스레드
+            cache_enabled=True
+        )
+        
+        self.worker.safe_emit(self.worker.log, f"실시간 번역 활성화: {', '.join(target_languages)}")
+        
+    def stop_streaming_translator(self):
+        """스트리밍 번역기 정지"""
+        if self.streaming_translator:
+            self.streaming_translator.stop()
+            stats = self.streaming_translator.get_stats()
+            self.worker.safe_emit(
+                self.worker.log,
+                f"실시간 번역 통계 - 처리: {stats['translated_segments']}, "
+                f"캐시 히트: {stats['cache_hits']}, 평균 시간: {stats['average_time']:.2f}초"
+            )
         
     def parse_download_progress(self, line):
         """Whisper 모델 다운로드 진행률 파싱"""
@@ -182,9 +236,8 @@ class ProgressParser:
         self.total_segments = 0
         self.processed_segments = 0
     
-    
     def parse_transcribe_progress(self, line, video_name):
-        """Whisper 음성 인식 진행률 파싱"""
+        """Whisper 음성 인식 진행률 파싱 - 실시간 번역 연동"""
         if not self.is_transcribing:
             return False
             
@@ -197,48 +250,59 @@ class ProgressParser:
             # 패턴 2: 00:00.000 --> 00:02.000  텍스트
             timestamp_pattern2 = r'(\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}\.\d{3})\s*(.+)?'
             match = re.search(timestamp_pattern2, line)
- 
         
         if match:
-            current_time = match.group(2)
+            start_time_str = match.group(1)
+            current_time_str = match.group(2)
             text = match.group(3) if len(match.groups()) >= 3 else ""
             
             # 시간을 초 단위로 변환
-            time_parts = current_time.split(':')
-            minutes = int(time_parts[0])
-            seconds = float(time_parts[1])
-            total_seconds = minutes * 60 + seconds
-            self.last_timestamp = total_seconds
+            start_seconds = self._time_to_seconds(start_time_str)
+            end_seconds = self._time_to_seconds(current_time_str)
+            
+            self.last_timestamp = end_seconds
             self.processed_segments += 1
+            
+            # 실시간 번역을 위한 세그먼트 생성
+            if text and text.strip() and self.streaming_translator:
+                segment = {
+                    'start': start_seconds,
+                    'end': end_seconds,
+                    'text': text.strip()
+                }
+                # 감지된 세그먼트 저장
+                self.detected_segments.append(segment)
+                # 스트리밍 번역기로 전송
+                self.streaming_translator.process_segment(segment)
             
             # 실제 오디오 길이를 기반으로 진행률 계산
             if self.audio_duration and self.audio_duration > 0:
-                percent = min(int((total_seconds / self.audio_duration) * 100), 95)
+                percent = min(int((end_seconds / self.audio_duration) * 100), 95)
                 
                 # 남은 시간 계산
-                remaining_seconds = self.audio_duration - total_seconds
+                remaining_seconds = self.audio_duration - end_seconds
                 if remaining_seconds > 0:
                     elapsed = time.time() - self.transcribe_start_time if self.transcribe_start_time else 0
-                    if elapsed > 0 and total_seconds > 0:
+                    if elapsed > 0 and end_seconds > 0:
                         # 처리 속도 기반 예측
-                        speed = total_seconds / elapsed
+                        speed = end_seconds / elapsed
                         estimated_remaining = remaining_seconds / speed if speed > 0 else remaining_seconds
                         
                         if estimated_remaining > 60:
                             remaining_min = int(estimated_remaining // 60)
                             remaining_sec = int(estimated_remaining % 60)
-                            status = f"음성 인식 중... [{current_time}/{self._format_time(self.audio_duration)}] - 예상 남은 시간: {remaining_min}분 {remaining_sec}초"
+                            status = f"음성 인식 중... [{current_time_str}/{self._format_time(self.audio_duration)}] - 예상 남은 시간: {remaining_min}분 {remaining_sec}초"
                         else:
-                            status = f"음성 인식 중... [{current_time}/{self._format_time(self.audio_duration)}] - 예상 남은 시간: {int(estimated_remaining)}초"
+                            status = f"음성 인식 중... [{current_time_str}/{self._format_time(self.audio_duration)}] - 예상 남은 시간: {int(estimated_remaining)}초"
                     else:
-                        status = f"음성 인식 중... [{current_time}/{self._format_time(self.audio_duration)}]"
+                        status = f"음성 인식 중... [{current_time_str}/{self._format_time(self.audio_duration)}]"
                 else:
-                    status = f"음성 인식 중... [{current_time}/{self._format_time(self.audio_duration)}]"
+                    status = f"음성 인식 중... [{current_time_str}/{self._format_time(self.audio_duration)}]"
             else:
                 # 오디오 길이를 모르는 경우
-                estimated_total = max(600, total_seconds * 1.2)  # 최소 10분
-                percent = min(int((total_seconds / estimated_total) * 100), 95)
-                status = f"음성 인식 중... [{current_time}]"
+                estimated_total = max(600, end_seconds * 1.2)  # 최소 10분
+                percent = min(int((end_seconds / estimated_total) * 100), 95)
+                status = f"음성 인식 중... [{current_time_str}]"
 
             # 텍스트 미리보기 추가 (너무 길면 자르기)
             if text and text.strip():
@@ -248,6 +312,7 @@ class ProgressParser:
             self.worker.safe_emit(self.worker.progress, video_name, 40 + int(percent * 0.5), status)
             
             return True
+            
         # 언어 감지 메시지   
         if "Detecting language" in line:
             self.worker.safe_emit(self.worker.progress, video_name, 35, "언어 감지 중...")
@@ -263,9 +328,13 @@ class ProgressParser:
             
         # 완료 메시지
         if "Transcription complete" in line or "Done" in line or "transcription finished" in line.lower():
-             self.worker.safe_emit(self.worker.progress, video_name, 90, "음성 인식 완료")
-             self.is_transcribing = False
-             return True
+            # 마지막 버퍼 비우기
+            if self.streaming_translator:
+                self.streaming_translator.flush_all()
+                
+            self.worker.safe_emit(self.worker.progress, video_name, 90, "음성 인식 완료")
+            self.is_transcribing = False
+            return True
             
         # 처리 메시지들
         if "Processing" in line or "Performing" in line:
@@ -289,8 +358,19 @@ class ProgressParser:
             
         return False
         
+    def _time_to_seconds(self, time_str):
+        """MM:SS.mmm 형식을 초로 변환"""
+        parts = time_str.split(':')
+        minutes = int(parts[0])
+        seconds = float(parts[1])
+        return minutes * 60 + seconds
+        
     def _format_time(self, seconds):
         """초를 MM:SS.mmm 형식으로 변환"""
         minutes = int(seconds // 60)
         secs = seconds % 60
         return f"{minutes:02d}:{secs:06.3f}"
+        
+    def get_detected_segments(self):
+        """감지된 세그먼트 반환"""
+        return self.detected_segments.copy()

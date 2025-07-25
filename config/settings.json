@@ -10,5 +10,7 @@
   "parallel_processing": true,
   "parallel_min_duration": 1800,
   "parallel_workers": 5,
-  "chunk_duration": 1800
+  "chunk_duration": 1800,
+  "realtime_translation": true,
+  "realtime_log": true
 }

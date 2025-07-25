@@ -1,5 +1,5 @@
 """
-비디오 처리 관련 로직
+비디오 처리 관련 로직 - 실시간 번역 통합 버전
 """
 from auto_subtitle_llama.cli import get_audio
 from auto_subtitle_llama.utils import filename, write_srt, get_text_batch, replace_text_batch, LANG_CODE_MAPPER, remove_duplicate_segments, advanced_remove_duplicates
@@ -14,11 +14,39 @@ import traceback
 import threading
 
 class VideoProcessor:
-    """비디오 처리 전담 클래스"""
+    """비디오 처리 전담 클래스 - 실시간 번역 지원"""
     
     def __init__(self, worker):
         self.worker = worker
         self.model = None
+        self.realtime_translations = {}  # 실시간 번역 결과 저장
+        
+    def detect_language(self, video_path):
+        """비디오의 언어 감지 (캐시 확인 포함)"""
+        # 캐시에서 확인
+        cache_path = self.worker.get_cache_path(video_path)
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'rb') as f:
+                    cached_data = pickle.load(f)
+                    return cached_data.get('detected_lang')
+            except:
+                pass
+        
+        # 캐시가 없으면 None 반환 (나중에 감지)
+        return None
+        
+    def save_realtime_translations(self, video_name, target_lang, segments):
+        """실시간 번역 결과 저장"""
+        key = f"{video_name}_{target_lang}"
+        if key not in self.realtime_translations:
+            self.realtime_translations[key] = []
+        self.realtime_translations[key].extend(segments)
+        
+    def get_realtime_translations(self, video_name, target_lang):
+        """실시간 번역 결과 가져오기"""
+        key = f"{video_name}_{target_lang}"
+        return self.realtime_translations.get(key, [])
         
     def load_model(self):
         """Whisper 모델 로드"""
@@ -35,7 +63,7 @@ class VideoProcessor:
         return self.model
         
     def process_video(self, video_path, idx, total):
-        """단일 비디오 처리"""
+        """단일 비디오 처리 - 실시간 번역 통합"""
         video_name = filename(video_path)
         self.worker.safe_emit(self.worker.log, f"\n[{idx+1}/{total}] {video_name} 처리 시작")
         
@@ -74,6 +102,22 @@ class VideoProcessor:
             
             if result is None or self.worker.is_cancelled:
                 return
+            
+            # 실시간 번역 결과 확인 및 통합
+            if self.worker.realtime_translation_enabled and self.worker.progress_parser.streaming_translator:
+                # 감지된 세그먼트 가져오기
+                detected_segments = self.worker.progress_parser.get_detected_segments()
+                
+                # 실시간 번역 통계
+                stats = self.worker.progress_parser.streaming_translator.get_stats()
+                self.worker.safe_emit(
+                    self.worker.log,
+                    f"실시간 번역 완료 - 처리: {stats['translated_segments']}개, "
+                    f"캐시 사용: {stats['cache_hits']}개"
+                )
+                
+                # 번역 결과는 이미 realtimeTranslation 시그널로 전송됨
+                # 여기서는 파일로 저장만 수행
             
             # 병렬 처리에서 번역이 이미 완료된 경우
             if isinstance(result, dict) and 'translations' in result:
@@ -132,11 +176,11 @@ class VideoProcessor:
             if self.worker.is_cancelled:
                 return
                 
-            # 6. 번역 처리
-            # 병렬 처리에서 이미 번역된 경우는 건너뛰기
+            # 6. 번역 처리 (실시간 번역이 없거나 비활성화된 경우)
             if (self.worker.settings['translate'] and 
                 self.worker.settings['languages'] and
-                not (isinstance(result, dict) and 'translations' in result)):
+                not (isinstance(result, dict) and 'translations' in result) and
+                not self.worker.realtime_translation_enabled):
                 self.process_translations(
                     video_path, audio_paths, detected_lang, result["segments"]
                 )
@@ -158,7 +202,7 @@ class VideoProcessor:
                 traceback.print_exc()
                 
     def transcribe_audio(self, audio_path, video_name):
-        """음성 인식 수행"""
+        """음성 인식 수행 - 실시간 번역 지원"""
         # 언어 감지
         self.worker.safe_emit(self.worker.progress, video_name, 30, "언어 감지 중...")
         
@@ -168,6 +212,20 @@ class VideoProcessor:
         _, probs = self.model.detect_language(mel)
         detected_lang = max(probs, key=probs.get)
         self.worker.safe_emit(self.worker.log, f"감지된 언어: {detected_lang}")
+        
+        # 실시간 번역기가 아직 초기화되지 않았다면 여기서 초기화
+        if (self.worker.realtime_translation_enabled and 
+            self.worker.settings.get('translate') and 
+            self.worker.settings.get('languages') and
+            not self.worker.progress_parser.streaming_translator):
+            
+            current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
+            source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
+            
+            self.worker.progress_parser.init_streaming_translator(
+                self.worker.settings['languages'],
+                source_mbart_code
+            )
 
         if self.worker.is_cancelled:
             return None, None
@@ -189,106 +247,28 @@ class VideoProcessor:
                 f"긴 오디오 감지 ({duration//60:.0f}분). 병렬 처리 시작..."
             )
             
-            # 병렬 처리
-            try:
-                from gui.parallel_processor import process_long_video_parallel
-            except ImportError:
-                self.worker.safe_emit(self.worker.log, "❌ 병렬 처리 모듈 로드 실패, 단일 처리로 전환")
-                return self._transcribe_single(audio_path, video_name, detected_lang)
-            
-            # 병렬 처리 시작 알림
-            num_workers = self.worker.settings.get('num_workers', 3)
-            self.worker.safe_emit(
-                self.worker.log, 
-                f"병렬 처리 시작: {num_workers}개 워커 사용"
-            )
-            
-            # 워커 진행률 초기화
-            self.worker.safe_emit(self.worker.initWorkerProgress, num_workers)
-            
-            # 진행률 콜백 함수
-            def progress_callback(message, percent):
-                if isinstance(message, dict) and message.get('type') == 'worker_progress':
-                    # 워커별 진행률 업데이트
-                    self.worker.safe_emit(
-                        self.worker.workerProgress,
-                        message['worker_id'],
-                        message['chunk_index'],
-                        message['progress'],
-                        message.get('status', '처리 중')
-                    )
-                elif isinstance(message, dict) and message.get('type') == 'log':
-                    # 로그 메시지 전달
-                    self.worker.safe_emit(self.worker.log, message['message'])
-                else:
-                    # 전체 진행률
-                    self.worker.safe_emit(
-                        self.worker.progress, 
-                        video_name, 
-                        40 + int(percent * 0.4),  # 40~80% 구간 사용
-                        message
-                    )
-            
-            # video_path 가져오기
-            video_path = self.worker.current_video_path
-            
-            # 번역 설정 추가
-            task_args = {
-                'task': 'transcribe',
-                'language': detected_lang
-            }
-            
-            # 병렬 처리에서도 번역하도록 설정
-            if self.worker.settings.get('translate') and self.worker.settings.get('languages'):
-                # mBART 소스 언어 코드
-                current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
-                source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
-                
-                task_args['translate_languages'] = self.worker.settings['languages']
-                task_args['source_lang'] = source_mbart_code
-            
-            result = process_long_video_parallel(
-                video_path=video_path,
-                audio_path=audio_path,
-                model_name=self.worker.settings['model'],
-                task_args=task_args,
-                num_workers=self.worker.settings.get('parallel_workers', 3),
-                chunk_duration=self.worker.settings.get('chunk_duration', 1800),
-                progress_callback=progress_callback
-            )
-            
-            # 에러 체크
-            if result.get('errors'):
-                self.worker.safe_emit(
-                    self.worker.log, 
-                    f"⚠️ {len(result['errors'])}개 청크에서 오류 발생"
-                )
-            
-            # 병렬 처리 결과 포맷 맞추기
-            formatted_result = {
-                'segments': result['segments'],
-                'language': detected_lang,
-                'translations': result.get('translations', {})
-            }
-            
-            self.worker.safe_emit(
-                self.worker.log, 
-                f"✓ 병렬 처리 완료: {len(result['segments'])}개 세그먼트"
-            )
-            
-            return formatted_result, detected_lang
+            # 병렬 처리에서도 실시간 번역 지원
+            return self._process_parallel_with_streaming(audio_path, video_name, detected_lang, duration)
             
         else:
             # 30분 미만 또는 병렬 처리 비활성화 시 단일 처리
             return self._transcribe_single(audio_path, video_name, detected_lang)
     
     def _transcribe_single(self, audio_path, video_name, detected_lang):
-        """단일 스레드 음성 인식"""
+        """단일 스레드 음성 인식 - 실시간 번역 지원"""
         self.worker.safe_emit(self.worker.progress, video_name, 40, "음성 인식 시작...")
         
         # 진행률 파서의 플래그 설정
         self.worker.progress_parser.is_transcribing = True
         self.worker.progress_parser.transcribe_start_time = time.time()
+        
+        # 오디오 길이 설정
+        try:
+            probe = ffmpeg.probe(audio_path)
+            duration = float(probe['streams'][0]['duration'])
+            self.worker.progress_parser.set_audio_duration(duration)
+        except:
+            pass
         
         result = None
         transcribe_thread = None
@@ -326,6 +306,97 @@ class VideoProcessor:
                 self.worker.active_threads.remove(transcribe_thread)
             
         return result, detected_lang
+            
+    def _process_parallel_with_streaming(self, audio_path, video_name, detected_lang, duration):
+        """병렬 처리 + 실시간 번역"""
+        try:
+            from gui.parallel_processor import process_long_video_parallel
+        except ImportError:
+            self.worker.safe_emit(self.worker.log, "❌ 병렬 처리 모듈 로드 실패, 단일 처리로 전환")
+            return self._transcribe_single(audio_path, video_name, detected_lang)
+        
+        # 병렬 처리 시작 알림
+        num_workers = self.worker.settings.get('num_workers', 3)
+        self.worker.safe_emit(
+            self.worker.log, 
+            f"병렬 처리 시작: {num_workers}개 워커 사용"
+        )
+        
+        # 워커 진행률 초기화
+        self.worker.safe_emit(self.worker.initWorkerProgress, num_workers)
+        
+        # 진행률 콜백 함수
+        def progress_callback(message, percent):
+            if isinstance(message, dict) and message.get('type') == 'worker_progress':
+                # 워커별 진행률 업데이트
+                self.worker.safe_emit(
+                    self.worker.workerProgress,
+                    message['worker_id'],
+                    message['chunk_index'],
+                    message['progress'],
+                    message.get('status', '처리 중')
+                )
+            elif isinstance(message, dict) and message.get('type') == 'log':
+                # 로그 메시지 전달
+                self.worker.safe_emit(self.worker.log, message['message'])
+            else:
+                # 전체 진행률
+                self.worker.safe_emit(
+                    self.worker.progress, 
+                    video_name, 
+                    40 + int(percent * 0.4),  # 40~80% 구간 사용
+                    message
+                )
+        
+        # video_path 가져오기
+        video_path = self.worker.current_video_path
+        
+        # 번역 설정 추가
+        task_args = {
+            'task': 'transcribe',
+            'language': detected_lang,
+            'realtime_translation': self.worker.realtime_translation_enabled  # 실시간 번역 플래그 추가
+        }
+        
+        # 병렬 처리에서도 번역하도록 설정 (실시간이 아닌 경우)
+        if self.worker.settings.get('translate') and self.worker.settings.get('languages') and not self.worker.realtime_translation_enabled:
+            # mBART 소스 언어 코드
+            current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
+            source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
+            
+            task_args['translate_languages'] = self.worker.settings['languages']
+            task_args['source_lang'] = source_mbart_code
+        
+        result = process_long_video_parallel(
+            video_path=video_path,
+            audio_path=audio_path,
+            model_name=self.worker.settings['model'],
+            task_args=task_args,
+            num_workers=self.worker.settings.get('parallel_workers', 3),
+            chunk_duration=self.worker.settings.get('chunk_duration', 1800),
+            progress_callback=progress_callback
+        )
+        
+        # 에러 체크
+        if result.get('errors'):
+            self.worker.safe_emit(
+                self.worker.log, 
+                f"⚠️ {len(result['errors'])}개 청크에서 오류 발생"
+            )
+        
+        # 병렬 처리 결과 포맷 맞추기
+        formatted_result = {
+            'segments': result['segments'],
+            'language': detected_lang,
+            'translations': result.get('translations', {})
+        }
+        
+        self.worker.safe_emit(
+            self.worker.log, 
+            f"✓ 병렬 처리 완료: {len(result['segments'])}개 세그먼트"
+        )
+        
+        return formatted_result, detected_lang
         
     def save_subtitles(self, video_name, segments):
         """자막 파일 저장"""

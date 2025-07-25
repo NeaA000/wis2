@@ -101,6 +101,24 @@ class ProgressPanel(QWidget):
             }
         """)
         
+        # 실시간 번역 표시 영역
+        realtime_label = QLabel("실시간 번역:")
+        self.realtime_text = QTextEdit()
+        self.realtime_text.setReadOnly(True)
+        self.realtime_text.setMaximumHeight(120)
+        self.realtime_text.setStyleSheet("""
+            QTextEdit {
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 11px;
+                background-color: #2d2d2d;
+                color: #f0f0f0;
+                border: 1px solid #404040;
+                border-radius: 4px;
+                padding: 5px;
+            }
+        """)
+        self.realtime_text.setVisible(False)  # 기본적으로 숨김
+        
         # 처리 완료 파일 목록
         completed_label = QLabel("완료된 파일:")
         self.completed_list = QListWidget()
@@ -132,6 +150,8 @@ class ProgressPanel(QWidget):
         layout.addLayout(time_layout)
         layout.addWidget(log_label)
         layout.addWidget(self.log_text)
+        layout.addWidget(realtime_label)
+        layout.addWidget(self.realtime_text)
         layout.addWidget(completed_label)
         layout.addWidget(self.completed_list)
         layout.addLayout(button_layout)
@@ -156,8 +176,6 @@ class ProgressPanel(QWidget):
                 self.memory_label.setStyleSheet("font-size: 12px; color: #666;")
         except:
             pass
-
-
         
     def start_processing(self, total_files):
         """처리 시작"""
@@ -234,8 +252,6 @@ class ProgressPanel(QWidget):
         self.add_log(f"\n[완료] 총 처리 시간: {self.elapsed_label.text()}")
         
     def add_log(self, message):
-       
-       
         # 동일한 메시지 반복 방지
         if hasattr(self, '_last_log_message') and self._last_log_message == message:
             return
@@ -318,6 +334,8 @@ class ProgressPanel(QWidget):
         self.cancel_btn.setText("취소")
         self.cancel_btn.setEnabled(False)
         self.worker_progress_group.setVisible(False)
+        self.realtime_text.clear()
+        self.realtime_text.setVisible(False)
         
     def init_worker_progress(self, num_workers):
         """워커별 진행률 바 초기화"""
@@ -360,3 +378,45 @@ class ProgressPanel(QWidget):
         if worker_id in self.worker_progress_bars:
             self.worker_progress_bars[worker_id]['progress'].setValue(progress)
             self.worker_progress_bars[worker_id]['status'].setText(f"청크 {chunk_index}: {status}")
+            
+    def show_realtime_translation(self, segment, language, translation):
+        """실시간 번역 표시"""
+        if not self.realtime_text.isVisible():
+            self.realtime_text.setVisible(True)
+            
+        # 타임스탬프 포맷
+        timestamp = f"[{self._format_time(segment['start'])} --> {self._format_time(segment['end'])}]"
+        
+        # HTML 형식으로 표시 (색상 구분)
+        html = f'''
+        <div style="margin-bottom: 8px;">
+            <span style="color: #4CAF50;">{timestamp}</span> 
+            <span style="color: #ffffff;">{segment['text']}</span><br>
+            <span style="color: #888;">└─ {language}:</span> 
+            <span style="color: #FFC107;">{translation}</span>
+        </div>
+        '''
+        
+        # 스크롤을 최하단으로 유지하면서 추가
+        cursor = self.realtime_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertHtml(html)
+        self.realtime_text.setTextCursor(cursor)
+        
+        # 너무 많은 내용이 쌓이면 오래된 것 제거
+        if self.realtime_text.document().lineCount() > 500:
+            cursor = self.realtime_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.movePosition(QTextCursor.MoveOperation.Down, QTextCursor.MoveMode.KeepAnchor, 50)
+            cursor.removeSelectedText()
+            
+    def _format_time(self, seconds):
+        """초를 HH:MM:SS 형식으로 변환"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        else:
+            return f"{minutes:02d}:{secs:02d}"
