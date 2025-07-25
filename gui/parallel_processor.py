@@ -16,8 +16,9 @@ from dataclasses import dataclass
 import threading
 import sys
 import re
+import platform
 
-# utils 함수들 import (수정됨)
+# utils 함수들 import
 from auto_subtitle_llama.utils import (
     write_srt, format_timestamp, adjust_timestamps, 
     merge_overlapping_segments, find_best_split_point
@@ -143,10 +144,62 @@ class ParallelVideoProcessor:
                        task_args: dict, worker_id: int):
         """워커 프로세스에서 청크 처리"""
 
-        # 각 워커에서 모델 로드
-        print(f"[Worker {worker_id}] Whisper 모델 로드 중...")
-        model = whisper.load_model(self.model_name)
+        # 파일 락을 사용한 모델 로드 동기화
+        model_lock_file = os.path.join(tempfile.gettempdir(), f"whisper_model_{self.model_name}.lock")
+        
+        # OS별 파일 락 처리
+        if platform.system() == "Windows":
+            import msvcrt
+            
+            with open(model_lock_file, 'w') as lock_file:
+                # Windows 파일 락
+                while True:
+                    try:
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except:
+                        time.sleep(0.1)
+                
+                print(f"[Worker {worker_id}] Whisper 모델 로드 중...")
+                model = whisper.load_model(self.model_name)
+                
+                # 락 해제
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            # Linux/Mac
+            import fcntl
+            
+            with open(model_lock_file, 'w') as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                
+                print(f"[Worker {worker_id}] Whisper 모델 로드 중...")
+                model = whisper.load_model(self.model_name)
+                
+                # 락 자동 해제
+        
         print(f"[Worker {worker_id}] 모델 로드 완료")
+        
+        # 번역이 필요한 경우 번역기 준비
+        translator = None
+        if task_args.get('translate_languages'):
+            from gui.worker.parallel_translator import ParallelTranslator
+            # 워커용 더미 객체 (safe_emit 등을 위해)
+            class WorkerProxy:
+                def __init__(self, result_queue, worker_id):
+                    self.result_queue = result_queue
+                    self.worker_id = worker_id
+                    self.is_cancelled = False
+                
+                def safe_emit(self, signal, *args):
+                    # 로그는 result_queue로 전달
+                    if signal.__name__ == 'log':
+                        self.result_queue.put({
+                            'type': 'log',
+                            'message': args[0]
+                        })
+            
+            worker_proxy = WorkerProxy(result_queue, worker_id)
+            translator = ParallelTranslator(worker_proxy, max_workers=1)  # 워커 내에서는 순차 처리
     
         while True:
             try:
@@ -210,7 +263,8 @@ class ParallelVideoProcessor:
                         task=task_args.get('task', 'transcribe'),
                         language=task_args.get('language'),
                         verbose=True,  # True로 변경
-                        fp16=False
+                        fp16=False,
+                        
                     )
                 finally:
                     # stdout 복원
@@ -223,13 +277,33 @@ class ParallelVideoProcessor:
                     chunk_info.start_time
                 )
             
+                # 번역 처리
+                translations = {}
+                if translator and task_args.get('translate_languages'):
+                    result_queue.put({
+                        'type': 'worker_progress',
+                        'worker_id': worker_id,
+                        'chunk_index': chunk_info.index,
+                        'progress': 80,
+                        'status': '번역 시작...'
+                    })
+                    
+                    # 청크별 번역 실행
+                    source_lang = task_args.get('source_lang', 'en_XX')
+                    translations = translator.translate_for_chunk(
+                        adjusted_segments,
+                        task_args['translate_languages'],
+                        source_lang,
+                        chunk_info.index
+                    )
+                
                 # 완료 시 100% 전송
                 result_queue.put({
                     'type': 'worker_progress',
                     'worker_id': worker_id,
                     'chunk_index': chunk_info.index,
                     'progress': 100,
-                    'status': '음성 인식 완료'
+                    'status': '처리 완료'
                 })
             
                 # 결과 전송
@@ -237,7 +311,8 @@ class ParallelVideoProcessor:
                     'type': 'result',
                     'chunk_info': chunk_info,
                     'segments': adjusted_segments,
-                    'language': result.get('language', task_args.get('language'))
+                    'language': result.get('language', task_args.get('language')),
+                    'translations': translations
                 })
             
                 print(f"[Worker {worker_id}] 청크 {chunk_info.index} 완료")
@@ -301,6 +376,10 @@ class ParallelVideoProcessor:
                 # 워커 진행률은 progress_callback으로 전달
                 if progress_callback:
                     progress_callback(result, 0)  # 진행률 데이터 전달
+            elif result.get('type') == 'log':
+                # 로그 메시지 전달
+                if progress_callback:
+                    progress_callback(result, 0)
             elif result.get('type') == 'error':
                 errors.append(result)
                 processed += 1
@@ -327,7 +406,7 @@ class ParallelVideoProcessor:
         results.sort(key=lambda x: x['chunk_info'].index)
         
         # 오버랩 부분 병합
-        merged_segments = self.merge_overlapping_results(results)
+        merged_segments, merged_translations = self.merge_overlapping_results(results)
         
         # 7. 임시 파일 정리
         if progress_callback:
@@ -343,23 +422,29 @@ class ParallelVideoProcessor:
             'language': results[0]['language'] if results else 'unknown',
             'processing_time': elapsed_time,
             'num_chunks': len(chunks),
-            'errors': errors
+            'errors': errors,
+            'translations': merged_translations
         }
         
-    def merge_overlapping_results(self, results: List[dict]) -> List[dict]:
+    def merge_overlapping_results(self, results: List[dict]) -> Tuple[List[dict], Dict[str, List[dict]]]:
         """오버랩된 결과 병합"""
         if not results:
-            return []
+            return [], {}
             
         all_segments = []
+        all_translations = {}  # 언어별 번역 결과 저장
         
         for i, result in enumerate(results):
             segments = result['segments']
             chunk_info = result['chunk_info']
+            translations = result.get('translations', {})
             
             if i == 0:
                 # 첫 번째 청크는 모두 추가
                 all_segments.extend(segments)
+                # 번역 결과도 추가
+                for lang, trans_segs in translations.items():
+                    all_translations[lang] = trans_segs
             else:
                 # 오버랩 구간에서 최적의 병합 지점 찾기
                 if chunk_info.overlap_start is not None:
@@ -373,12 +458,31 @@ class ParallelVideoProcessor:
                     for segment in segments:
                         if segment['start'] >= merge_point:
                             all_segments.append(segment)
+                    
+                    # 번역 결과도 같은 방식으로 병합
+                    for lang, trans_segs in translations.items():
+                        if lang not in all_translations:
+                            all_translations[lang] = []
+                        
+                        for trans_seg in trans_segs:
+                            if trans_seg['start'] >= merge_point:
+                                all_translations[lang].append(trans_seg)
                 else:
                     # 오버랩이 없으면 모두 추가
                     all_segments.extend(segments)
+                    for lang, trans_segs in translations.items():
+                        if lang not in all_translations:
+                            all_translations[lang] = []
+                        all_translations[lang].extend(trans_segs)
         
-        # utils의 merge_overlapping_segments 사용하여 추가 정리
-        return merge_overlapping_segments(all_segments)
+        # 원본과 번역 모두 정리
+        merged_segments = merge_overlapping_segments(all_segments)
+        
+        # 번역 결과도 정리
+        for lang in all_translations:
+            all_translations[lang] = merge_overlapping_segments(all_translations[lang])
+        
+        return merged_segments, all_translations
         
     def _find_best_merge_point(self, prev_segments: List[dict], 
                               curr_segments: List[dict], 

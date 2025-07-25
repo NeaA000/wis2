@@ -143,7 +143,7 @@ def get_subtitles(audio_paths: list, output_srt: bool, output_dir: str, model:wh
         result = model.transcribe(audio_path, **args)
         
         if translate_to is not None and translate_to not in current_lang:
-            print("[Step3] translate (Llama2)")
+            print("[Step3] translate (mBART)")
             text_batch = get_text_batch(segments=result["segments"])
             translated_batch = translates(translate_to=translate_to, text_batch=text_batch, source_lang=source_mbart_code)
             result["segments"] = replace_text_batch(segments=result["segments"], translated_batch=translated_batch)
@@ -156,16 +156,23 @@ def get_subtitles(audio_paths: list, output_srt: bool, output_dir: str, model:wh
 
     return subtitles_path, detected_language
 
-def translates(translate_to: str, text_batch: List[str], max_batch_size: int = 32, source_lang: str = "en_XX"):
+def translates(translate_to: str, text_batch: List[str], max_batch_size: int = None, source_lang: str = "en_XX"):
     # 싱글톤 매니저에서 모델 가져오기
     translator_manager = TranslatorManager()
     model, tokenizer = translator_manager.get_translator()
     
     # 소스 언어 설정
     tokenizer.src_lang = source_lang
-
-    # 토크나이저 소스 언어 명시적 설정
-    tokenizer.src_lang = source_lang
+    
+    # 동적 배치 크기 결정
+    if max_batch_size is None:
+        total = len(text_batch)
+        if total <= 50:
+            max_batch_size = total  # 한 번에 처리
+        elif total <= 200:
+            max_batch_size = 50
+        else:
+            max_batch_size = 50  # 큰 배치
     
     # split text_batch into max_batch_size
     divided_text_batches = [text_batch[i:i+max_batch_size] for i in range(0, len(text_batch), max_batch_size)]
@@ -178,15 +185,16 @@ def translates(translate_to: str, text_batch: List[str], max_batch_size: int = 3
            return_tensors="pt", 
            padding=True,
            truncation=True,
-           max_length=512
+           max_length=256  # 자막은 대부분 짧음
        )
        generated_tokens = model.generate(
            **model_inputs,
            forced_bos_token_id=tokenizer.lang_code_to_id[translate_to],
-           max_length=512,
-           num_beams=4,
+           max_length=256,
+           num_beams=2,  # 속도 우선
            early_stopping=True,
-           no_repeat_ngram_size=3
+           no_repeat_ngram_size=3,
+           use_cache=True
        )
        translated_batch.extend(tokenizer.batch_decode(generated_tokens, skip_special_tokens=True))
    

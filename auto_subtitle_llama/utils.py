@@ -124,18 +124,17 @@ class TranslatorManager:
         return self._model, self._tokenizer
     
     def _load_model(self):
-        """모델 로드 (한 번만 실행)"""
+        """모델 로드 (한 번만 실행) - Facebook mBART 사용"""
         print("Loading translation model... (this may take a while)")
-        from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
-        self._model = MBartForConditionalGeneration.from_pretrained("SnypzZz/Llama2-13b-Language-translate")
-        self._tokenizer = MBart50TokenizerFast.from_pretrained("SnypzZz/Llama2-13b-Language-translate", src_lang="en_XX")
+        # load_translator 함수를 직접 호출
+        self._model, self._tokenizer = load_translator("en_XX")
         print("Translation model loaded successfully!")
 
 
 def load_translator(source_lang="en_XX"):
     from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
     
-    # 이 부분만 변경: SnypzZz 모델을 Facebook 모델로 교체
+    # Facebook mBART 모델 사용 (2.4GB, 더 효율적)
     model = MBartForConditionalGeneration.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
     tokenizer = MBart50TokenizerFast.from_pretrained("facebook/mbart-large-50-many-to-many-mmt", src_lang=source_lang)
     

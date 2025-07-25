@@ -74,6 +74,33 @@ class VideoProcessor:
             
             if result is None or self.worker.is_cancelled:
                 return
+            
+            # 병렬 처리에서 번역이 이미 완료된 경우
+            if isinstance(result, dict) and 'translations' in result:
+                # 번역된 결과 저장
+                for lang_code, trans_segments in result['translations'].items():
+                    if trans_segments:
+                        trans_srt_path = os.path.join(
+                            self.worker.settings['output_dir'],
+                            f"{video_name}_{lang_code.split('_')[0]}.srt"
+                        )
+                        with open(trans_srt_path, "w", encoding="utf-8") as srt_file:
+                            write_srt(trans_segments, srt_file)
+                        
+                        self.worker.safe_emit(self.worker.log, f"✓ {lang_code} 자막 저장: {trans_srt_path}")
+                        
+                        # 비디오 임베딩
+                        if not self.worker.settings['srt_only']:
+                            self.embed_subtitles(
+                                video_path, 
+                                {video_path: trans_srt_path}, 
+                                detected_lang, 
+                                lang_code
+                            )
+                
+                # result가 dict인 경우 segments 추출
+                if isinstance(result, dict):
+                    result = {'segments': result.get('segments', [])}
                 
             # 중복 세그먼트 제거
             original_count = len(result["segments"])
@@ -106,7 +133,10 @@ class VideoProcessor:
                 return
                 
             # 6. 번역 처리
-            if self.worker.settings['translate'] and self.worker.settings['languages']:
+            # 병렬 처리에서 이미 번역된 경우는 건너뛰기
+            if (self.worker.settings['translate'] and 
+                self.worker.settings['languages'] and
+                not (isinstance(result, dict) and 'translations' in result)):
                 self.process_translations(
                     video_path, audio_paths, detected_lang, result["segments"]
                 )
@@ -187,6 +217,9 @@ class VideoProcessor:
                         message['progress'],
                         message.get('status', '처리 중')
                     )
+                elif isinstance(message, dict) and message.get('type') == 'log':
+                    # 로그 메시지 전달
+                    self.worker.safe_emit(self.worker.log, message['message'])
                 else:
                     # 전체 진행률
                     self.worker.safe_emit(
@@ -199,14 +232,26 @@ class VideoProcessor:
             # video_path 가져오기
             video_path = self.worker.current_video_path
             
+            # 번역 설정 추가
+            task_args = {
+                'task': 'transcribe',
+                'language': detected_lang
+            }
+            
+            # 병렬 처리에서도 번역하도록 설정
+            if self.worker.settings.get('translate') and self.worker.settings.get('languages'):
+                # mBART 소스 언어 코드
+                current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
+                source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
+                
+                task_args['translate_languages'] = self.worker.settings['languages']
+                task_args['source_lang'] = source_mbart_code
+            
             result = process_long_video_parallel(
                 video_path=video_path,
                 audio_path=audio_path,
                 model_name=self.worker.settings['model'],
-                task_args={
-                    'task': 'transcribe',
-                    'language': detected_lang
-                },
+                task_args=task_args,
                 num_workers=self.worker.settings.get('parallel_workers', 3),
                 chunk_duration=self.worker.settings.get('chunk_duration', 1800),
                 progress_callback=progress_callback
@@ -222,7 +267,8 @@ class VideoProcessor:
             # 병렬 처리 결과 포맷 맞추기
             formatted_result = {
                 'segments': result['segments'],
-                'language': detected_lang
+                'language': detected_lang,
+                'translations': result.get('translations', {})
             }
             
             self.worker.safe_emit(
@@ -327,65 +373,43 @@ class VideoProcessor:
         video_name = filename(video_path)
         total_langs = len(self.worker.settings['languages'])
 
-        # 번역 모듈 임포트 (지연 로딩)
-        try:
-            from auto_subtitle_llama.cli import translates
-        except ImportError:
-            self.worker.safe_emit(self.worker.log, "❌ 번역 모듈 로드 실패")
-            return
+        # 병렬 번역기 사용
+        from gui.worker.parallel_translator import ParallelTranslator
+        translator = ParallelTranslator(self.worker)
 
         # mBART 소스 언어 코드 가져오기
         current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
         source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
          
-        for i, target_lang in enumerate(self.worker.settings['languages']):
-            if self.worker.is_cancelled:
-                break
-                
-            # 같은 언어는 건너뛰기
-            if target_lang.startswith(detected_lang):
+        # 캐시되지 않은 언어만 필터링
+        languages_to_translate = []
+        for lang in self.worker.settings['languages']:
+            # 언어 비교 버그 수정: mBART 형식으로 비교
+            if lang == source_mbart_code:
+                self.worker.safe_emit(self.worker.log, f"✓ {lang}는 원본과 같은 언어이므로 건너뜁니다")
                 continue
-                
-            # 캐시 확인
-            cache_path = self.worker.get_cache_path(video_path, target_lang)
-            if os.path.exists(cache_path):
-                self.worker.safe_emit(
-                    self.worker.progress,
-                    video_name,
-                    60 + (i * 30 // total_langs),
-                    f"{target_lang} 캐시 로드 중..."
-                )
-                continue
-                
-            # 번역 수행
-            progress = 60 + (i * 30 // total_langs)
-            self.worker.safe_emit(self.worker.progress, video_name, progress, f"{target_lang} 번역 중...")
-            
-            try:
-                if self.worker.is_cancelled:
-                    break
-                    
-                self.worker.safe_emit(self.worker.log, f"{target_lang} 번역 시작...")
-
-                # segments 깊은 복사
-                translated_segments = copy.deepcopy(segments)
-                
-                # 텍스트 배치 추출 및 번역
-                text_batch = get_text_batch(translated_segments)
-                # 번역 실행 (싱글톤 모델 사용)
-                translated_batch = translates(
-                    translate_to=target_lang, 
-                    text_batch=text_batch, 
-                    source_lang=source_mbart_code
-                )
-                
-                if self.worker.is_cancelled:
-                    break
-                    
-                # 번역된 텍스트로 segments 업데이트
-                translated_segments = replace_text_batch(translated_segments, translated_batch)
-                
-                # 번역된 SRT 저장
+            cache_path = self.worker.get_cache_path(video_path, lang)
+            if not os.path.exists(cache_path):
+                languages_to_translate.append(lang)
+        
+        if not languages_to_translate:
+            self.worker.safe_emit(self.worker.log, "모든 번역이 캐시에 있음")
+            return
+        
+        # 병렬 번역 실행
+        self.worker.safe_emit(self.worker.progress, video_name, 60, f"{len(languages_to_translate)}개 언어 병렬 번역 시작...")
+        
+        translation_results = translator.translate_multiple_languages(
+            segments,
+            languages_to_translate,
+            source_mbart_code,
+            video_name
+        )
+        
+        # 결과 저장 및 임베딩
+        for target_lang, translated_segments in translation_results.items():
+            if translated_segments and not self.worker.is_cancelled:
+                # SRT 저장
                 translated_srt_path = os.path.join(
                     self.worker.settings['output_dir'], 
                     f"{video_name}_{target_lang.split('_')[0]}.srt"
@@ -394,29 +418,25 @@ class VideoProcessor:
                 with open(translated_srt_path, "w", encoding="utf-8") as srt_file:
                     write_srt(translated_segments, srt_file)
                 
-                translated_subtitles = {video_path: translated_srt_path}
-                
-                # 번역 결과 캐시
+                # 캐시 저장
+                cache_path = self.worker.get_cache_path(video_path, target_lang)
                 with open(cache_path, 'wb') as f:
                     pickle.dump({
-                        'subtitles': translated_subtitles,
+                        'subtitles': {video_path: translated_srt_path},
                         'segments': translated_segments
                     }, f)
-                    
-                self.worker.safe_emit(self.worker.log, f"✓ {target_lang} 번역 완료")
                 
                 # 비디오 임베딩
-                if not self.worker.settings['srt_only'] and not self.worker.is_cancelled:
+                if not self.worker.settings['srt_only']:
                     self.embed_subtitles(
-                        video_path, translated_subtitles, detected_lang, target_lang
+                        video_path, 
+                        {video_path: translated_srt_path}, 
+                        detected_lang, 
+                        target_lang
                     )
-                    
-            except Exception as e:
-                if not self.worker.is_cancelled:
-                    self.worker.safe_emit(self.worker.log, f"❌ {target_lang} 번역 실패: {str(e)}")
 
-                 # 번역 완료 후 메모리 정리
-        if 'translates' in locals():
+        # 번역 완료 후 메모리 정리
+        if 'translator' in locals():
             try:
                 from auto_subtitle_llama.utils import TranslatorManager
                 manager = TranslatorManager()
