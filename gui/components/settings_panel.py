@@ -5,9 +5,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QComboBox, QPushButton, QCheckBox, QGroupBox,
     QListWidget, QListWidgetItem, QFileDialog,
-    QAbstractItemView
+    QAbstractItemView, QSpinBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal
 import json
 import os
 
@@ -19,14 +19,8 @@ class SettingsPanel(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.is_loading = False  # 설정 로드 중 플래그
-        self.save_timer = QTimer()  # 디바운싱을 위한 타이머
-        self.save_timer.setSingleShot(True)
-        self.save_timer.timeout.connect(self.save_settings)
-        
         self.init_ui()
         self.load_settings()
-        self.connect_signals()  # 시그널 연결을 로드 후에 수행
         
     def init_ui(self):
         """UI 초기화"""
@@ -130,6 +124,38 @@ class SettingsPanel(QWidget):
         output_layout.addWidget(self.srt_only_check)
         output_group.setLayout(output_layout)
         
+        # 고급 설정 그룹 (새로 추가)
+        advanced_group = QGroupBox("고급 설정 (실험적)")
+        advanced_layout = QVBoxLayout()
+        
+        self.parallel_check = QCheckBox("긴 영상 병렬 처리 (1시간 이상)")
+        self.parallel_check.setChecked(True)
+        self.parallel_check.setToolTip(
+            "1시간 이상의 영상을 여러 부분으로 나누어 동시에 처리합니다.\n"
+            "처리 속도가 2-3배 빨라지지만 더 많은 메모리를 사용합니다."
+        )
+        self.parallel_check.stateChanged.connect(self.on_parallel_toggled)
+        
+        workers_layout = QHBoxLayout()
+        workers_label = QLabel("동시 작업 수:")
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(1, 8)
+        self.workers_spin.setValue(4)
+        self.workers_spin.setToolTip("동시에 처리할 청크 수 (CPU 코어 수 고려)")
+        
+        workers_layout.addWidget(workers_label)
+        workers_layout.addWidget(self.workers_spin)
+        workers_layout.addStretch()
+        
+        parallel_info = QLabel("⚡ 병렬 처리를 사용하면 긴 영상의 처리 속도가 크게 향상됩니다")
+        parallel_info.setWordWrap(True)
+        parallel_info.setStyleSheet("font-size: 12px; color: #888;")
+        
+        advanced_layout.addWidget(self.parallel_check)
+        advanced_layout.addLayout(workers_layout)
+        advanced_layout.addWidget(parallel_info)
+        advanced_group.setLayout(advanced_layout)
+        
         # 캐시 설정
         cache_group = QGroupBox("캐시")
         cache_layout = QHBoxLayout()
@@ -146,35 +172,19 @@ class SettingsPanel(QWidget):
         layout.addWidget(model_group)
         layout.addWidget(translate_group)
         layout.addWidget(output_group)
+        layout.addWidget(advanced_group)  # 고급 설정 추가
         layout.addWidget(cache_group)
         layout.addStretch()
         
         self.setLayout(layout)
         
-    def connect_signals(self):
-        """시그널 연결 (로드 완료 후 호출)"""
-        # 모델 변경 시 자동 저장
-        self.model_combo.currentIndexChanged.connect(self.on_settings_changed)
-        
-        # 번역 체크박스 변경 시 자동 저장 (이미 연결된 on_translate_toggled에서 처리)
-        
-        # 언어 선택 변경 시 자동 저장
-        self.lang_list.itemSelectionChanged.connect(self.on_settings_changed)
-        
-        # SRT only 체크박스 변경 시 자동 저장
-        self.srt_only_check.stateChanged.connect(self.on_settings_changed)
-        
     def on_translate_toggled(self, checked):
         """번역 활성화/비활성화"""
         self.lang_list.setEnabled(checked)
-        self.on_settings_changed()  # 설정 저장
         
-    def on_settings_changed(self):
-        """설정 변경 시 호출 (디바운싱 적용)"""
-        if not self.is_loading:  # 로드 중이 아닐 때만 저장
-            # 기존 타이머 취소하고 새로 시작 (500ms 디바운싱)
-            self.save_timer.stop()
-            self.save_timer.start(500)
+    def on_parallel_toggled(self, checked):
+        """병렬 처리 활성화/비활성화"""
+        self.workers_spin.setEnabled(checked)
         
     def browse_output_dir(self):
         """출력 디렉토리 선택"""
@@ -185,7 +195,7 @@ class SettingsPanel(QWidget):
         )
         if dir_path:
             self.output_path.setText(dir_path)
-            self.on_settings_changed()  # save_settings() 대신 디바운싱 적용
+            self.save_settings()
             
     def clear_cache(self):
         """캐시 삭제"""
@@ -197,6 +207,7 @@ class SettingsPanel(QWidget):
                 os.makedirs(cache_dir)
                 self.clear_cache_btn.setText("✓ 캐시 삭제됨")
                 # 2초 후 원래 텍스트로 복원
+                from PyQt6.QtCore import QTimer
                 QTimer.singleShot(2000, lambda: self.clear_cache_btn.setText("캐시 삭제"))
             except Exception as e:
                 print(f"캐시 삭제 실패: {e}")
@@ -215,24 +226,21 @@ class SettingsPanel(QWidget):
             "translate": self.translate_check.isChecked(),
             "languages": selected_languages,
             "output_dir": self.output_path.text(),
-            "srt_only": self.srt_only_check.isChecked()
+            "srt_only": self.srt_only_check.isChecked(),
+            "use_parallel": self.parallel_check.isChecked(),
+            "num_workers": self.workers_spin.value()
         }
         
     def save_settings(self):
         """설정 저장"""
-        try:
-            settings = self.get_settings()
-            os.makedirs("config", exist_ok=True)
-            with open("config/settings.json", "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2, ensure_ascii=False)
-            self.settingsChanged.emit(settings)
-            print(f"설정 저장됨: {settings}")  # 디버깅용
-        except Exception as e:
-            print(f"설정 저장 실패: {e}")
+        settings = self.get_settings()
+        os.makedirs("config", exist_ok=True)
+        with open("config/settings.json", "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+        self.settingsChanged.emit(settings)
         
     def load_settings(self):
         """설정 불러오기"""
-        self.is_loading = True  # 로드 시작
         try:
             with open("config/settings.json", "r", encoding="utf-8") as f:
                 settings = json.load(f)
@@ -257,12 +265,10 @@ class SettingsPanel(QWidget):
             self.output_path.setText(settings.get("output_dir", "output/"))
             self.srt_only_check.setChecked(settings.get("srt_only", False))
             
-            print(f"설정 로드됨: {settings}")  # 디버깅용
+            # 고급 설정
+            self.parallel_check.setChecked(settings.get("use_parallel", True))
+            self.workers_spin.setValue(settings.get("num_workers", 4))
             
         except FileNotFoundError:
             # 설정 파일이 없으면 기본값 사용
-            print("설정 파일 없음, 기본값 사용")
-        except Exception as e:
-            print(f"설정 로드 실패: {e}")
-        finally:
-            self.is_loading = False  # 로드 완료
+            pass

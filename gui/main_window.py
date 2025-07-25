@@ -11,7 +11,7 @@ import os
 import sys
 
 from .components import DropZone, ProgressPanel, SettingsPanel
-from .worker import SubtitleWorker
+from .worker.worker import SubtitleWorker
 from .styles import get_stylesheet
 
 class MainWindow(QMainWindow):

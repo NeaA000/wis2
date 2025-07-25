@@ -134,9 +134,7 @@ def get_subtitles(audio_paths: list, output_srt: bool, output_dir: str, model:wh
         current_lang = LANG_CODE_MAPPER.get(detected_language, [])
         
         print("[Step2] transcribe (Whisper)")
-        if detected_language != "en" and translate_to is not None and translate_to not in current_lang:
-            args["task"] = "translate"
-            print(f"transcribe-task changed for llama translator")
+        # Always use transcribe task - translation will be handled by LLaMA2
         result = model.transcribe(audio_path, **args)
         
         if translate_to is not None and translate_to not in current_lang:
