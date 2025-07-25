@@ -4,7 +4,7 @@ import whisper
 import argparse
 import warnings
 import tempfile
-from .utils import *
+from .utils import LANG_CODE_MAPPER, WHISPER_TO_MBART_LANG_CODE, str2bool, format_timestamp, write_srt, filename, load_translator, get_text_batch, replace_text_batch
 from typing import List, Tuple
 from tqdm import tqdm
 
@@ -132,15 +132,19 @@ def get_subtitles(audio_paths: list, output_srt: bool, output_dir: str, model:wh
         _, probs = model.detect_language(mel)
         detected_language = max(probs, key=probs.get)
         current_lang = LANG_CODE_MAPPER.get(detected_language, [])
+
+        # mBART 언어 코드 추출 (LANG_CODE_MAPPER의 두 번째 요소)
+        source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
         
         print("[Step2] transcribe (Whisper)")
-        # Always use transcribe task - translation will be handled by LLaMA2
+        ## 항상 transcribe 사용 (translate 태스크 제거)
+        args["task"] = "transcribe"
         result = model.transcribe(audio_path, **args)
         
         if translate_to is not None and translate_to not in current_lang:
             print("[Step3] translate (Llama2)")
             text_batch = get_text_batch(segments=result["segments"])
-            translated_batch = translates(translate_to=translate_to, text_batch=text_batch)
+            translated_batch = translates(translate_to=translate_to, text_batch=text_batch, source_lang=source_mbart_code)
             result["segments"] = replace_text_batch(segments=result["segments"], translated_batch=translated_batch)
             print(f"translated to {translate_to}")
         
@@ -151,8 +155,11 @@ def get_subtitles(audio_paths: list, output_srt: bool, output_dir: str, model:wh
 
     return subtitles_path, detected_language
 
-def translates(translate_to: str, text_batch: List[str], max_batch_size: int = 32):
-    model, tokenizer = load_translator()
+def translates(translate_to: str, text_batch: List[str], source_lang: str = "en_XX", max_batch_size: int = 32):
+    model, tokenizer = load_translator(source_lang)
+
+    # 토크나이저 소스 언어 명시적 설정
+    tokenizer.src_lang = source_lang
     
     # split text_batch into max_batch_size
     divided_text_batches = [text_batch[i:i+max_batch_size] for i in range(0, len(text_batch), max_batch_size)]
@@ -160,15 +167,24 @@ def translates(translate_to: str, text_batch: List[str], max_batch_size: int = 3
     translated_batch = []
     
     for batch in tqdm(divided_text_batches, desc="batch translate"):
-        model_inputs = tokenizer(batch, return_tensors="pt", padding=True)
-        generated_tokens = model.generate(
-            **model_inputs,
-            forced_bos_token_id=tokenizer.lang_code_to_id[translate_to]
-        )
-        translated_batch.extend(tokenizer.batch_decode(generated_tokens, skip_special_tokens=True))
-    
+       model_inputs = tokenizer(
+           batch, 
+           return_tensors="pt", 
+           padding=True,
+           truncation=True,
+           max_length=512
+       )
+       generated_tokens = model.generate(
+           **model_inputs,
+           forced_bos_token_id=tokenizer.lang_code_to_id[translate_to],
+           max_length=512,
+           num_beams=4,
+           early_stopping=True,
+           no_repeat_ngram_size=3
+       )
+       translated_batch.extend(tokenizer.batch_decode(generated_tokens, skip_special_tokens=True))
+   
     return translated_batch
-
 
 if __name__ == '__main__':
     main()

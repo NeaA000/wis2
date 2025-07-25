@@ -2,11 +2,13 @@
 비디오 처리 관련 로직
 """
 from auto_subtitle_llama.cli import get_audio, translates
-from auto_subtitle_llama.utils import filename, write_srt, get_text_batch, replace_text_batch
+
+from auto_subtitle_llama.utils import filename, write_srt, get_text_batch, replace_text_batch, LANG_CODE_MAPPER
 import whisper
 import ffmpeg
 import pickle
 import os
+import copy
 import time
 import tempfile
 import traceback
@@ -189,6 +191,11 @@ class VideoProcessor:
             
         video_name = filename(video_path)
         total_langs = len(self.worker.settings['languages'])
+
+         # mBART 소스 언어 코드 가져오기
+        current_lang = LANG_CODE_MAPPER.get(detected_lang, [])
+        source_mbart_code = current_lang[1] if len(current_lang) > 1 else "en_XX"
+         
         
         for i, target_lang in enumerate(self.worker.settings['languages']):
             if self.worker.is_cancelled:
@@ -218,16 +225,19 @@ class VideoProcessor:
                     break
                     
                 self.worker.safe_emit(self.worker.log, f"{target_lang} 번역 시작...")
+
+                # segments 깊은 복사
+                translated_segments = copy.deepcopy(segments)
                 
                 # 텍스트 배치 추출 및 번역
-                text_batch = get_text_batch(segments)
-                translated_batch = translates(target_lang, text_batch)
+                text_batch = get_text_batch(translated_segments)
+                translated_batch = translates(target_lang, text_batch, source_lang=source_mbart_code)
                 
                 if self.worker.is_cancelled:
                     break
                     
                 # 번역된 텍스트로 segments 업데이트
-                translated_segments = replace_text_batch(segments.copy(), translated_batch)
+                translated_segments = replace_text_batch(translated_segments, translated_batch)
                 
                 # 번역된 SRT 저장
                 translated_srt_path = os.path.join(

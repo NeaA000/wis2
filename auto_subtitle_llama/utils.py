@@ -54,6 +54,36 @@ LANG_CODE_MAPPER = {
     "tl": ["tagalog", "tl_XX"],
 }
 
+# Whisper 언어 코드 → mBART 언어 코드 매핑
+WHISPER_TO_MBART_LANG_CODE = {
+    "en": "en_XX",
+    "zh": "zh_CN",
+    "de": "de_DE",
+    "es": "es_XX",
+    "ru": "ru_RU",
+    "ko": "ko_KR",
+    "fr": "fr_XX",
+    "ja": "ja_XX",
+    "pt": "pt_XX",
+    "tr": "tr_TR",
+    "pl": "pl_PL",
+    "it": "it_IT",
+    "nl": "nl_XX",
+    "ar": "ar_AR",
+    "sv": "sv_SE",
+    "id": "id_ID",
+    "hi": "hi_IN",
+    "fi": "fi_FI",
+    "vi": "vi_VN",
+    "he": "he_IL",
+    "uk": "uk_UA",
+    "cs": "cs_CZ",
+    "ro": "ro_RO",
+    "ta": "ta_IN",
+    "th": "th_TH",
+}
+
+
 def str2bool(string):
     string = string.lower()
     str2val = {"true": True, "false": False}
@@ -98,10 +128,10 @@ def filename(path):
     return os.path.splitext(os.path.basename(path))[0]
 
 
-def load_translator():
+def load_translator(source_lang="en_XX"):
     from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
     model = MBartForConditionalGeneration.from_pretrained("SnypzZz/Llama2-13b-Language-translate")
-    tokenizer = MBart50TokenizerFast.from_pretrained("SnypzZz/Llama2-13b-Language-translate", src_lang="en_XX")
+    tokenizer = MBart50TokenizerFast.from_pretrained("SnypzZz/Llama2-13b-Language-translate", src_lang=source_lang)
     return model, tokenizer
 
 def get_text_batch(segments:List[dict]):
