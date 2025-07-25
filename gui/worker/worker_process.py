@@ -151,8 +151,9 @@ class VideoProcessor:
             duration = 0
             self.worker.safe_emit(self.worker.log, "오디오 길이 확인 실패, 단일 처리 모드 사용")
         
-        # 30분(1800초) 이상이고 병렬 처리 설정이 켜져있으면 병렬 처리
-        if duration > 1800 and self.worker.settings.get('parallel_processing', True):
+        # 설정된 최소 시간 이상이고 병렬 처리 설정이 켜져있으면 병렬 처리
+        min_duration = self.worker.settings.get('parallel_min_duration', 1800)
+        if duration > min_duration and self.worker.settings.get('parallel_processing', True):
             self.worker.safe_emit(
                 self.worker.log, 
                 f"긴 오디오 감지 ({duration//60:.0f}분). 병렬 처리 시작..."
@@ -206,7 +207,8 @@ class VideoProcessor:
                     'task': 'transcribe',
                     'language': detected_lang
                 },
-                num_workers=self.worker.settings.get('num_workers', 3),
+                num_workers=self.worker.settings.get('parallel_workers', 3),
+                chunk_duration=self.worker.settings.get('chunk_duration', 1800),
                 progress_callback=progress_callback
             )
             
@@ -412,6 +414,20 @@ class VideoProcessor:
             except Exception as e:
                 if not self.worker.is_cancelled:
                     self.worker.safe_emit(self.worker.log, f"❌ {target_lang} 번역 실패: {str(e)}")
+
+                 # 번역 완료 후 메모리 정리
+        if 'translates' in locals():
+            try:
+                from auto_subtitle_llama.utils import TranslatorManager
+                manager = TranslatorManager()
+                if hasattr(manager, '_model') and manager._model is not None:
+                    import gc
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+            except:
+                pass
                     
     def embed_subtitles(self, video_path, srt_paths, detected_lang, target_lang=None):
         """비디오에 자막 임베딩"""

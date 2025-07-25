@@ -234,7 +234,12 @@ class ProgressPanel(QWidget):
         self.add_log(f"\n[완료] 총 처리 시간: {self.elapsed_label.text()}")
         
     def add_log(self, message):
-        """로그 메시지 추가"""
+       
+       
+        # 동일한 메시지 반복 방지
+        if hasattr(self, '_last_log_message') and self._last_log_message == message:
+            return
+        self._last_log_message = message
 
         # 로그가 너무 많으면 오래된 것 제거
         if self.log_text.document().lineCount() > 1000:

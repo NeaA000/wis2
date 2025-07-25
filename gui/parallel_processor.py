@@ -14,6 +14,7 @@ import time
 import traceback
 from dataclasses import dataclass
 import threading
+import re
 
 # utils 함수들 import (수정됨)
 from auto_subtitle_llama.utils import (
@@ -147,7 +148,13 @@ class ParallelVideoProcessor:
         
         while True:
             try:
+                 # 취소 확인 추가
+                if hasattr(threading.current_thread(), 'cancel_event'):
+                    if threading.current_thread().cancel_event.is_set():
+                        break
+                        
                 chunk_info = chunk_queue.get(timeout=1)
+
                 if chunk_info is None:  # 종료 신호
                     break
                     
@@ -158,7 +165,7 @@ class ParallelVideoProcessor:
                 
                 # 청크 길이에 따른 예상 처리 시간 (대략적)
                 # 일반적으로 Whisper는 실시간의 5-10배 속도로 처리
-                estimated_duration = chunk_info.duration / 5  # 5배속 가정
+                estimated_duration = chunk_info.duration / 1.1  # 5배속 가정
                 
                 # 주기적으로 진행률 업데이트
                 def update_progress():
@@ -420,11 +427,13 @@ class ParallelVideoProcessor:
 def process_long_video_parallel(video_path: str, audio_path: str, 
                               model_name: str, task_args: dict,
                               num_workers: int = None,
+                              chunk_duration: int = 1800,
                               progress_callback=None) -> dict:
     """긴 비디오를 병렬로 처리하는 헬퍼 함수"""
     processor = ParallelVideoProcessor(
         model_name=model_name,
-        num_workers=num_workers
+        num_workers=num_workers,
+        chunk_duration=chunk_duration
     )
     
     return processor.process_video_parallel(
