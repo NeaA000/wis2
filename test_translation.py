@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from auto_subtitle_llama.cli import translates
-from auto_subtitle_llama.utils import WHISPER_TO_MBART_LANG_CODE
+# WHISPER_TO_MBART_LANG_CODE 제거
 
 def test_translation():
     """번역 테스트"""

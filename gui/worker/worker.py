@@ -5,6 +5,7 @@ import threading
 import traceback
 import queue
 import time
+from PyQt6.QtCore import pyqtSignal
 from auto_subtitle_llama.utils import filename
 
 from .worker_base import BaseSubtitleWorker, ProgressParser
@@ -12,6 +13,10 @@ from .worker_process import VideoProcessor
 
 class SubtitleWorker(BaseSubtitleWorker):
     """자막 생성 워커 스레드 - 메인 클래스"""
+    
+    # 병렬 처리용 시그널 추가
+    workerProgress = pyqtSignal(int, int, int, str)  # worker_id, chunk_index, progress, status
+    initWorkerProgress = pyqtSignal(int)  # num_workers
     
     def __init__(self, video_paths, settings):
         super().__init__(video_paths, settings)

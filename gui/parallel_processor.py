@@ -13,6 +13,7 @@ from typing import List, Dict, Tuple, Optional
 import time
 import traceback
 from dataclasses import dataclass
+import threading
 
 # utils 함수들 import (수정됨)
 from auto_subtitle_llama.utils import (
@@ -152,13 +153,50 @@ class ParallelVideoProcessor:
                     
                 print(f"[Worker {worker_id}] 청크 {chunk_info.index} 처리 시작")
                 
-                # Whisper로 음성 인식
+                # 진행률 추정을 위한 시작 시간
+                start_time = time.time()
+                
+                # 청크 길이에 따른 예상 처리 시간 (대략적)
+                # 일반적으로 Whisper는 실시간의 5-10배 속도로 처리
+                estimated_duration = chunk_info.duration / 5  # 5배속 가정
+                
+                # 주기적으로 진행률 업데이트
+                def update_progress():
+                    elapsed = time.time() - start_time
+                    progress = min(int((elapsed / estimated_duration) * 95), 95)  # 최대 95%
+                    
+                    result_queue.put({
+                        'type': 'worker_progress',
+                        'worker_id': worker_id,
+                        'chunk_index': chunk_info.index,
+                        'progress': progress,
+                        'status': f"처리 중... ({elapsed:.1f}초)"
+                    })
+                
+                # 백그라운드 스레드로 진행률 업데이트
+                progress_stop = threading.Event()
+                
+                def progress_updater():
+                    while not progress_stop.is_set():
+                        update_progress()
+                        time.sleep(2)  # 2초마다 업데이트
+                
+                progress_thread = threading.Thread(target=progress_updater)
+                progress_thread.daemon = True
+                progress_thread.start()
+                
+                # Whisper로 음성 인식 (verbose=False로 변경)
                 result = model.transcribe(
                     chunk_info.temp_path,
                     task=task_args.get('task', 'transcribe'),
                     language=task_args.get('language'),
-                    verbose=False
+                    verbose=False,  # False로 변경
+                    fp16=False  # CPU에서는 FP32 사용
                 )
+                
+                # 진행률 업데이트 중지
+                progress_stop.set()
+                progress_thread.join(timeout=1)
                 
                 # 타임스탬프 조정 (utils 함수 사용)
                 adjusted_segments = adjust_timestamps(
@@ -166,8 +204,18 @@ class ParallelVideoProcessor:
                     chunk_info.start_time
                 )
                 
+                # 완료 시 100% 전송
+                result_queue.put({
+                    'type': 'worker_progress',
+                    'worker_id': worker_id,
+                    'chunk_index': chunk_info.index,
+                    'progress': 100,
+                    'status': '완료'
+                })
+                
                 # 결과 전송
                 result_queue.put({
+                    'type': 'result',
                     'chunk_info': chunk_info,
                     'segments': adjusted_segments,
                     'language': result.get('language', task_args.get('language'))
@@ -179,6 +227,7 @@ class ParallelVideoProcessor:
                 print(f"[Worker {worker_id}] 오류: {e}")
                 traceback.print_exc()
                 result_queue.put({
+                    'type': 'error',
                     'chunk_info': chunk_info if 'chunk_info' in locals() else None,
                     'error': str(e)
                 })
@@ -228,14 +277,19 @@ class ParallelVideoProcessor:
         while processed < len(chunks):
             result = result_queue.get()
             
-            if 'error' in result:
+            # 타입별로 처리
+            if result.get('type') == 'worker_progress':
+                # 워커 진행률은 progress_callback으로 전달
+                if progress_callback:
+                    progress_callback(result, 0)  # 진행률 데이터 전달
+            elif result.get('type') == 'error':
                 errors.append(result)
-            else:
+                processed += 1
+            elif result.get('type') == 'result':
                 results.append(result)
-                
-            processed += 1
+                processed += 1
             
-            if progress_callback:
+            if progress_callback and processed > 0:
                 progress = 20 + (processed / len(chunks) * 60)
                 progress_callback(
                     f"청크 처리 중... ({processed}/{len(chunks)})",

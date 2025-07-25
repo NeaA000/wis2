@@ -4,7 +4,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QProgressBar, QPushButton, QListWidget, QListWidgetItem,
-    QTextEdit
+    QTextEdit, QGroupBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QTextCursor
@@ -39,6 +39,13 @@ class ProgressPanel(QWidget):
         # 현재 파일 정보
         self.current_file_label = QLabel("대기 중...")
         self.current_file_label.setStyleSheet("font-size: 14px; font-weight: 500;")
+        
+        # 병렬 처리 워커 진행률 그룹 (처음엔 숨김)
+        self.worker_progress_group = QGroupBox("병렬 처리 상태")
+        self.worker_progress_group.setVisible(False)
+        self.worker_progress_layout = QVBoxLayout()
+        self.worker_progress_bars = {}
+        self.worker_progress_group.setLayout(self.worker_progress_layout)
         
         # 전체 진행률
         overall_layout = QHBoxLayout()
@@ -118,6 +125,7 @@ class ProgressPanel(QWidget):
         # 레이아웃에 추가
         layout.addWidget(title)
         layout.addWidget(self.current_file_label)
+        layout.addWidget(self.worker_progress_group)
         layout.addLayout(overall_layout)
         layout.addLayout(current_layout)
         layout.addWidget(self.status_label)
@@ -304,3 +312,46 @@ class ProgressPanel(QWidget):
         self.log_text.clear()
         self.cancel_btn.setText("취소")
         self.cancel_btn.setEnabled(False)
+        self.worker_progress_group.setVisible(False)
+        
+    def init_worker_progress(self, num_workers):
+        """워커별 진행률 바 초기화"""
+        # 기존 진행률 바 제거
+        for widget_info in self.worker_progress_bars.values():
+            # 레이아웃의 모든 위젯 제거
+            while widget_info['layout'].count():
+                item = widget_info['layout'].takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            widget_info['layout'].deleteLater()
+        self.worker_progress_bars.clear()
+        
+        # 새 진행률 바 생성
+        for i in range(num_workers):
+            worker_layout = QHBoxLayout()
+            label = QLabel(f"Worker {i}:")
+            label.setFixedWidth(70)
+            progress = QProgressBar()
+            progress.setTextVisible(True)
+            status = QLabel("대기 중")
+            status.setStyleSheet("font-size: 11px; color: #666;")
+            status.setMinimumWidth(150)
+            
+            worker_layout.addWidget(label)
+            worker_layout.addWidget(progress)
+            worker_layout.addWidget(status)
+            
+            self.worker_progress_layout.addLayout(worker_layout)
+            self.worker_progress_bars[i] = {
+                'layout': worker_layout,
+                'progress': progress,
+                'status': status
+            }
+        
+        self.worker_progress_group.setVisible(True)
+
+    def update_worker_progress(self, worker_id, chunk_index, progress, status):
+        """워커별 진행률 업데이트"""
+        if worker_id in self.worker_progress_bars:
+            self.worker_progress_bars[worker_id]['progress'].setValue(progress)
+            self.worker_progress_bars[worker_id]['status'].setText(f"청크 {chunk_index}: {status}")

@@ -229,6 +229,8 @@ class MainWindow(QMainWindow):
         
         # 시그널 연결
         self.worker.progress.connect(self.progress_panel.update_file_progress)
+        self.worker.workerProgress.connect(self.progress_panel.update_worker_progress)
+        self.worker.initWorkerProgress.connect(self.progress_panel.init_worker_progress)
         self.worker.fileCompleted.connect(self.on_file_completed)
         self.worker.finished.connect(self.on_all_completed)
         self.worker.error.connect(self.on_error)
@@ -334,6 +336,8 @@ class MainWindow(QMainWindow):
             # 시그널 연결 해제
             try:
                 self.worker.progress.disconnect()
+                self.worker.workerProgress.disconnect()
+                self.worker.initWorkerProgress.disconnect()
                 self.worker.fileCompleted.disconnect()
                 self.worker.finished.disconnect()
                 self.worker.error.disconnect()

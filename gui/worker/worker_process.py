@@ -165,14 +165,35 @@ class VideoProcessor:
                 self.worker.safe_emit(self.worker.log, "❌ 병렬 처리 모듈 로드 실패, 단일 처리로 전환")
                 return self._transcribe_single(audio_path, video_name, detected_lang)
             
+            # 병렬 처리 시작 알림
+            num_workers = self.worker.settings.get('num_workers', 3)
+            self.worker.safe_emit(
+                self.worker.log, 
+                f"병렬 처리 시작: {num_workers}개 워커 사용"
+            )
+            
+            # 워커 진행률 초기화
+            self.worker.safe_emit(self.worker.initWorkerProgress, num_workers)
+            
             # 진행률 콜백 함수
             def progress_callback(message, percent):
-                self.worker.safe_emit(
-                    self.worker.progress, 
-                    video_name, 
-                    40 + int(percent * 0.4),  # 40~80% 구간 사용
-                    message
-                )
+                if isinstance(message, dict) and message.get('type') == 'worker_progress':
+                    # 워커별 진행률 업데이트
+                    self.worker.safe_emit(
+                        self.worker.workerProgress,
+                        message['worker_id'],
+                        message['chunk_index'],
+                        message['progress'],
+                        message.get('status', '처리 중')
+                    )
+                else:
+                    # 전체 진행률
+                    self.worker.safe_emit(
+                        self.worker.progress, 
+                        video_name, 
+                        40 + int(percent * 0.4),  # 40~80% 구간 사용
+                        message
+                    )
             
             # video_path 가져오기
             video_path = self.worker.current_video_path
