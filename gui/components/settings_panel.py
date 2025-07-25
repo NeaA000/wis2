@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QFileDialog,
     QAbstractItemView
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 import json
 import os
 
@@ -19,8 +19,14 @@ class SettingsPanel(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.is_loading = False  # 설정 로드 중 플래그
+        self.save_timer = QTimer()  # 디바운싱을 위한 타이머
+        self.save_timer.setSingleShot(True)
+        self.save_timer.timeout.connect(self.save_settings)
+        
         self.init_ui()
         self.load_settings()
+        self.connect_signals()  # 시그널 연결을 로드 후에 수행
         
     def init_ui(self):
         """UI 초기화"""
@@ -145,9 +151,30 @@ class SettingsPanel(QWidget):
         
         self.setLayout(layout)
         
+    def connect_signals(self):
+        """시그널 연결 (로드 완료 후 호출)"""
+        # 모델 변경 시 자동 저장
+        self.model_combo.currentIndexChanged.connect(self.on_settings_changed)
+        
+        # 번역 체크박스 변경 시 자동 저장 (이미 연결된 on_translate_toggled에서 처리)
+        
+        # 언어 선택 변경 시 자동 저장
+        self.lang_list.itemSelectionChanged.connect(self.on_settings_changed)
+        
+        # SRT only 체크박스 변경 시 자동 저장
+        self.srt_only_check.stateChanged.connect(self.on_settings_changed)
+        
     def on_translate_toggled(self, checked):
         """번역 활성화/비활성화"""
         self.lang_list.setEnabled(checked)
+        self.on_settings_changed()  # 설정 저장
+        
+    def on_settings_changed(self):
+        """설정 변경 시 호출 (디바운싱 적용)"""
+        if not self.is_loading:  # 로드 중이 아닐 때만 저장
+            # 기존 타이머 취소하고 새로 시작 (500ms 디바운싱)
+            self.save_timer.stop()
+            self.save_timer.start(500)
         
     def browse_output_dir(self):
         """출력 디렉토리 선택"""
@@ -158,7 +185,7 @@ class SettingsPanel(QWidget):
         )
         if dir_path:
             self.output_path.setText(dir_path)
-            self.save_settings()
+            self.on_settings_changed()  # save_settings() 대신 디바운싱 적용
             
     def clear_cache(self):
         """캐시 삭제"""
@@ -170,7 +197,6 @@ class SettingsPanel(QWidget):
                 os.makedirs(cache_dir)
                 self.clear_cache_btn.setText("✓ 캐시 삭제됨")
                 # 2초 후 원래 텍스트로 복원
-                from PyQt6.QtCore import QTimer
                 QTimer.singleShot(2000, lambda: self.clear_cache_btn.setText("캐시 삭제"))
             except Exception as e:
                 print(f"캐시 삭제 실패: {e}")
@@ -194,14 +220,19 @@ class SettingsPanel(QWidget):
         
     def save_settings(self):
         """설정 저장"""
-        settings = self.get_settings()
-        os.makedirs("config", exist_ok=True)
-        with open("config/settings.json", "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=2)
-        self.settingsChanged.emit(settings)
+        try:
+            settings = self.get_settings()
+            os.makedirs("config", exist_ok=True)
+            with open("config/settings.json", "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+            self.settingsChanged.emit(settings)
+            print(f"설정 저장됨: {settings}")  # 디버깅용
+        except Exception as e:
+            print(f"설정 저장 실패: {e}")
         
     def load_settings(self):
         """설정 불러오기"""
+        self.is_loading = True  # 로드 시작
         try:
             with open("config/settings.json", "r", encoding="utf-8") as f:
                 settings = json.load(f)
@@ -226,6 +257,12 @@ class SettingsPanel(QWidget):
             self.output_path.setText(settings.get("output_dir", "output/"))
             self.srt_only_check.setChecked(settings.get("srt_only", False))
             
+            print(f"설정 로드됨: {settings}")  # 디버깅용
+            
         except FileNotFoundError:
             # 설정 파일이 없으면 기본값 사용
-            pass
+            print("설정 파일 없음, 기본값 사용")
+        except Exception as e:
+            print(f"설정 로드 실패: {e}")
+        finally:
+            self.is_loading = False  # 로드 완료

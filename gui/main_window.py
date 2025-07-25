@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QPushButton, QMessageBox, QLabel
 )
-from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtCore import Qt, QThread, QTimer
 from PyQt6.QtGui import QIcon
 import os
 import sys
@@ -21,6 +21,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.worker = None
         self.video_queue = []
+        self.is_closing = False
         self.init_ui()
         self.load_style()
         
@@ -207,7 +208,15 @@ class MainWindow(QMainWindow):
         settings = self.settings_panel.get_settings()
         
         # 출력 디렉토리 생성
-        os.makedirs(settings['output_dir'], exist_ok=True)
+        try:
+            os.makedirs(settings['output_dir'], exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "오류",
+                f"출력 폴더를 생성할 수 없습니다:\n{str(e)}"
+            )
+            return
         
         # 진행 상황 탭으로 전환
         self.switch_tab(1)
@@ -225,19 +234,27 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self.on_error)
         self.worker.log.connect(self.progress_panel.add_log)
         
+        # Worker 종료 시 정리
+        self.worker.finished.connect(self.cleanup_worker)
+        
         # 시작
         self.worker.start()
         
         # UI 상태 변경
         self.start_btn.setEnabled(False)
         self.drop_zone.setEnabled(False)
+        self.settings_panel.setEnabled(False)  # 처리 중 설정 변경 방지
         
     def on_file_completed(self, filename, output_path):
         """파일 처리 완료"""
-        self.progress_panel.file_completed(filename, output_path)
+        if not self.is_closing:
+            self.progress_panel.file_completed(filename, output_path)
         
     def on_all_completed(self):
         """모든 파일 처리 완료"""
+        if self.is_closing:
+            return
+            
         self.progress_panel.finish_processing()
         
         # 완료 메시지
@@ -253,12 +270,13 @@ class MainWindow(QMainWindow):
         self.update_queue_label()
         
         # UI 상태 복원
-        self.start_btn.setEnabled(False)
-        self.drop_zone.setEnabled(True)
-        self.drop_zone.reset()
+        self.restore_ui_state()
         
     def on_error(self, error_msg):
         """에러 발생"""
+        if self.is_closing:
+            return
+            
         QMessageBox.critical(
             self,
             "오류 발생",
@@ -266,8 +284,14 @@ class MainWindow(QMainWindow):
         )
         
         # UI 상태 복원
+        self.restore_ui_state()
+        
+    def restore_ui_state(self):
+        """UI 상태 복원"""
         self.start_btn.setEnabled(len(self.video_queue) > 0)
         self.drop_zone.setEnabled(True)
+        self.drop_zone.reset()
+        self.settings_panel.setEnabled(True)
         
     def cancel_processing(self):
         """처리 취소"""
@@ -281,19 +305,50 @@ class MainWindow(QMainWindow):
             )
             
             if reply == QMessageBox.StandardButton.Yes:
-                self.worker.cancel()
-                self.worker.quit()
-                self.worker.wait()
+                # 취소 상태 설정
+                self.progress_panel.add_log("취소 처리 중...")
+                
+                # Worker 취소
+                if self.worker:
+                    self.worker.cancel()
+                    
+                    # Worker가 완전히 종료될 때까지 대기 (최대 5초)
+                    if not self.worker.wait(5000):
+                        # 강제 종료
+                        self.worker.terminate()
+                        self.worker.wait()
+                        self.progress_panel.add_log("작업이 강제 종료되었습니다.")
+                    else:
+                        self.progress_panel.add_log("작업이 취소되었습니다.")
                 
                 # UI 상태 복원
-                self.start_btn.setEnabled(len(self.video_queue) > 0)
-                self.drop_zone.setEnabled(True)
+                self.restore_ui_state()
                 self.progress_panel.reset()
                 
+                # Worker 정리
+                self.cleanup_worker()
+                
+    def cleanup_worker(self):
+        """Worker 정리"""
+        if self.worker:
+            # 시그널 연결 해제
+            try:
+                self.worker.progress.disconnect()
+                self.worker.fileCompleted.disconnect()
+                self.worker.finished.disconnect()
+                self.worker.error.disconnect()
+                self.worker.log.disconnect()
+            except:
+                pass
+            
+            # Worker 삭제
+            self.worker.deleteLater()
+            self.worker = None
+            
     def on_settings_changed(self, settings):
         """설정 변경"""
         # 설정이 변경될 때마다 자동 저장됨
-        pass
+        print(f"설정 변경됨: {settings}")
         
     def closeEvent(self, event):
         """윈도우 종료 이벤트"""
@@ -306,9 +361,19 @@ class MainWindow(QMainWindow):
             )
             
             if reply == QMessageBox.StandardButton.Yes:
-                self.worker.cancel()
-                self.worker.quit()
-                self.worker.wait()
+                self.is_closing = True
+                
+                # Worker 취소 및 종료
+                if self.worker:
+                    self.worker.cancel()
+                    
+                    # 종료 대기 (최대 3초)
+                    if not self.worker.wait(3000):
+                        self.worker.terminate()
+                        self.worker.wait()
+                        
+                    self.cleanup_worker()
+                
                 event.accept()
             else:
                 event.ignore()
