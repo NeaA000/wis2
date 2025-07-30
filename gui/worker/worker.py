@@ -10,6 +10,7 @@ from auto_subtitle_llama.utils import filename, LANG_CODE_MAPPER
 
 from .worker_base import BaseSubtitleWorker, ProgressParser
 from .worker_process import VideoProcessor
+from .progress_tracker import ProgressTracker
 
 class SubtitleWorker(BaseSubtitleWorker):
     """자막 생성 워커 스레드 - 메인 클래스"""
@@ -23,13 +24,25 @@ class SubtitleWorker(BaseSubtitleWorker):
         self.current_video_path = None
         self.progress_parser = ProgressParser(self)
         self.video_processor = VideoProcessor(self)
+        self.progress_tracker = None
 
         self.last_progress_update = 0
-        self.progress_throttle = 0.1  # 최소 0.1초 간격
+        self.progress_throttle = 0.05  # 최소 0.05초 간격으로 변경 (더 부드러운 업데이트)
         
         # 실시간 번역 설정 확인
         self.realtime_translation_enabled = settings.get('realtime_translation', True)
         self.translation_results = {}  # 실시간 번역 결과 저장
+        
+    def _progress_callback(self, filename: str, percent: int, status: str):
+        """ProgressTracker 콜백"""
+        self.safe_emit_progress(filename, percent, status)
+        
+    def init_progress_tracker(self, video_path: str):
+        """진행률 추적기 초기화"""
+        self.progress_tracker = ProgressTracker(self._progress_callback)
+        self.progress_tracker.set_translation_languages(
+            self.settings.get('languages', []) if self.settings.get('translate') else []
+        )
          
     def safe_emit_progress(self, filename, percent, status):
         """진행률 업데이트 throttling"""
@@ -42,7 +55,7 @@ class SubtitleWorker(BaseSubtitleWorker):
         """콘솔 큐 처리"""
         buffer = ""
         log_counter = 0
-        log_skip_threshold = 10  # 10개마다 하나씩만 표시
+        log_skip_threshold = 5  # 5개마다 하나씩만 표시
         while not self.is_cancelled:
             try:
                 text = self.console_queue.get(timeout=0.1)
@@ -54,6 +67,9 @@ class SubtitleWorker(BaseSubtitleWorker):
                     for line in lines[:-1]:
                         if line.strip() and not self.is_cancelled:
                             try:
+                                # Whisper 자막 출력인지 확인 (타임스탬프 패턴)
+                                is_subtitle = '-->' in line and '[' in line and ']' in line
+                                
                                 # Whisper 다운로드 진행률 파싱
                                 if self.progress_parser.parse_download_progress(line.strip()):
                                     continue
@@ -63,7 +79,11 @@ class SubtitleWorker(BaseSubtitleWorker):
                                 if self.progress_parser.parse_transcribe_progress(line.strip(), video_name):
                                     continue
                                     
-                                # 로그 스킵 (너무 많은 로그 방지)
+                                # 로그 스킵 (자막은 항상 표시)
+                                if is_subtitle:
+                                    self.log.emit(line.strip())
+                                    continue
+                                    
                                 log_counter += 1
                                 if log_counter % log_skip_threshold == 0 or "error" in line.lower() or "warning" in line.lower():
                                     self.log.emit(line.strip())
@@ -87,6 +107,11 @@ class SubtitleWorker(BaseSubtitleWorker):
             self.console_thread.daemon = True
             self.console_thread.start()
             
+            # 진행률 추적 시작
+            if len(self.video_paths) > 0:
+                self.progress_tracker = ProgressTracker(self._progress_callback)
+                self.progress_tracker.enter_stage('model_load', "모델 로드 중...")
+            
             # 모델 로드
             model = self.video_processor.load_model()
             if model is None or self.is_cancelled:
@@ -98,6 +123,11 @@ class SubtitleWorker(BaseSubtitleWorker):
                     break
                     
                 self.current_video_path = video_path
+                
+                # 비디오별 진행률 추적기 초기화
+                video_name = filename(video_path)
+                self.init_progress_tracker(video_path)
+                self.progress_tracker.start(video_name)
                 
                 # 실시간 번역이 활성화되고 번역 언어가 설정된 경우
                 if (self.realtime_translation_enabled and 

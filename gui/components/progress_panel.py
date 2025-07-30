@@ -257,6 +257,21 @@ class ProgressPanel(QWidget):
             return
         self._last_log_message = message
 
+        # 자막 로그인지 확인하고 특별 처리
+        is_subtitle = '-->' in message and '[' in message and ']' in message
+
+        if is_subtitle:
+    # 자막은 다른 색상으로 표시
+            timestamp = time.strftime("%H:%M:%S")
+            formatted_message = f'<span style="color: #888;">[{timestamp}]</span> <span style="color: #0d7377; font-weight: bold;">{message}</span>'
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertHtml(formatted_message + '<br>')
+            self.log_text.setTextCursor(cursor)
+            self.log_text.ensureCursorVisible()
+            return
+
+
         # 로그가 너무 많으면 오래된 것 제거
         if self.log_text.document().lineCount() > 1000:
             cursor = self.log_text.textCursor()

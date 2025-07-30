@@ -53,7 +53,8 @@ class VideoProcessor:
     def load_model(self):
         """Whisper 모델 로드"""
         if not self.worker.is_cancelled:
-            self.worker.safe_emit(self.worker.log, f"Whisper {self.worker.settings['model']} 모델 로드 중...")
+            if self.worker.progress_tracker:
+                self.worker.progress_tracker.update_stage_progress(50, "Whisper 모델 로드 중...")
             
             if len(self.worker.video_paths) > 0:
                 video_name = filename(self.worker.video_paths[0])
@@ -61,6 +62,9 @@ class VideoProcessor:
                 
             self.model = whisper.load_model(self.worker.settings['model'])
             self.worker.safe_emit(self.worker.log, f"✓ 모델 로드 완료")
+            
+            if self.worker.progress_tracker:
+                self.worker.progress_tracker.update_stage_progress(100, "모델 로드 완료")
             
         return self.model
         
@@ -97,7 +101,8 @@ class VideoProcessor:
                 return
                 
             # 2. 오디오 추출
-            self.worker.safe_emit(self.worker.progress, video_name, 20, "오디오 추출 중...")
+            if self.worker.progress_tracker:
+                self.worker.progress_tracker.enter_stage('audio_extract', "오디오 추출 중...")
             self.worker.safe_emit(self.worker.log, "오디오 스트림 추출 중...")
             audio_paths = get_audio([video_path])
             self.worker.safe_emit(self.worker.log, "✓ 오디오 추출 완료")
@@ -362,7 +367,8 @@ class VideoProcessor:
     def transcribe_audio(self, audio_path, video_name):
         """음성 인식 수행 - 실시간 번역 지원"""
         # 언어 감지
-        self.worker.safe_emit(self.worker.progress, video_name, 30, "언어 감지 중...")
+        if self.worker.progress_tracker:
+            self.worker.progress_tracker.enter_stage('transcribe', "언어 감지 중...")
         
         audio = whisper.load_audio(audio_path)
         audio = whisper.pad_or_trim(audio)
@@ -414,11 +420,13 @@ class VideoProcessor:
     
     def _transcribe_single(self, audio_path, video_name, detected_lang):
         """단일 스레드 음성 인식 - 실시간 번역 지원"""
-        self.worker.safe_emit(self.worker.progress, video_name, 40, "음성 인식 시작...")
+        if self.worker.progress_tracker:
+            self.worker.progress_tracker.update_stage_progress(10, "음성 인식 시작...")
         
         # 진행률 파서의 플래그 설정
         self.worker.progress_parser.is_transcribing = True
         self.worker.progress_parser.transcribe_start_time = time.time()
+        self.worker.progress_parser.progress_tracker = self.worker.progress_tracker
         
         # 오디오 길이 설정
         try:

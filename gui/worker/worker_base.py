@@ -120,6 +120,7 @@ class ProgressParser:
         self.processed_segments = 0
         self.streaming_translator = None
         self.detected_segments = []  # 감지된 세그먼트 저장
+        self.progress_tracker = None  # ProgressTracker 참조
         
     def init_streaming_translator(self, target_languages, source_lang):
         """스트리밍 번역기 초기화"""
@@ -275,6 +276,17 @@ class ProgressParser:
                 # 스트리밍 번역기로 전송
                 self.streaming_translator.process_segment(segment)
             
+            # 자막 텍스트를 로그에도 표시
+            if text and text.strip():
+                self.worker.safe_emit(self.worker.log, f"{match.group(0)}")
+            
+            # ProgressTracker 업데이트
+            if self.progress_tracker and self.audio_duration:
+                self.progress_tracker.update_transcribe_progress(
+                    end_seconds, self.audio_duration, text
+                )
+                return True  # 진행률 업데이트 완료
+                
             # 실제 오디오 길이를 기반으로 진행률 계산
             if self.audio_duration and self.audio_duration > 0:
                 percent = min(int((end_seconds / self.audio_duration) * 100), 95)
@@ -306,8 +318,9 @@ class ProgressParser:
 
             # 텍스트 미리보기 추가 (너무 길면 자르기)
             if text and text.strip():
-                preview = text.strip()[:50] + "..." if len(text.strip()) > 50 else text.strip()
-                status += f" - {preview}"    
+                # 진행률 표시에는 짧게만
+                preview = text.strip()[:30] + "..." if len(text.strip()) > 30 else text.strip()
+                status += f" - {preview}"
             
             self.worker.safe_emit(self.worker.progress, video_name, 40 + int(percent * 0.5), status)
             
