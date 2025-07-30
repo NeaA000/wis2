@@ -130,7 +130,6 @@ class ParallelTranslator:
                     forced_bos_token_id=tokenizer.lang_code_to_id[target_lang],
                     max_length=256,
                     num_beams=2,  # 속도 우선
-                    #early_stopping=True,
                     no_repeat_ngram_size=3,
                     use_cache=True
                 )

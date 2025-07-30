@@ -5,7 +5,7 @@
     "en_XX",
     "es_XX"
   ],
-  "output_dir": "C:/Users/user/Desktop",
+  "output_dir": "C:/Users/user/Desktop/자막",
   "srt_only": true,
   "parallel_processing": true,
   "parallel_min_duration": 1800,

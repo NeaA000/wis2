@@ -114,6 +114,36 @@ class VideoProcessor:
             if result is None or self.worker.is_cancelled:
                 return
             
+            # Whisper 결과의 모든 세그먼트를 실시간 번역기로 전송
+            if (self.worker.realtime_translation_enabled and 
+                self.worker.settings.get('translate') and 
+                self.worker.settings.get('languages') and
+                self.worker.progress_parser.streaming_translator):
+                
+                try:
+                    self.worker.safe_emit(self.worker.log, 
+                        f"Whisper 결과 세그먼트를 실시간 번역기로 전송 중... (총 {len(result.get('segments', []))}개)")
+                    
+                    # 이미 처리된 세그먼트 추적 (중복 방지)
+                    processed_segments = set()
+                    
+                    # 모든 세그먼트를 번역기로 전송
+                    for i, segment in enumerate(result.get('segments', [])):
+                        if segment.get('text', '').strip():
+                            # 중복 체크
+                            seg_key = f"{segment['start']:.3f}-{segment['end']:.3f}"
+                            if seg_key not in processed_segments:
+                                processed_segments.add(seg_key)
+                                self.worker.progress_parser.streaming_translator.process_segment(segment)
+                            
+                            # 진행률 업데이트
+                            progress = 90 + int((i / len(result['segments'])) * 5)
+                            self.worker.safe_emit(self.worker.progress, video_name, progress, 
+                                f"번역 준비 중... ({i+1}/{len(result['segments'])})")
+                    
+                except Exception as e:
+                    self.worker.safe_emit(self.worker.log, f"세그먼트 전송 중 오류: {str(e)}")
+            
             # 실시간 번역 결과 확인 및 통합
             if self.worker.realtime_translation_enabled and self.worker.progress_parser.streaming_translator:
                 try:
@@ -123,7 +153,10 @@ class VideoProcessor:
                     
                     # executor 완전 종료 대기
                     self.worker.safe_emit(self.worker.log, "번역 작업 완료 대기 중...")
-                    self.worker.progress_parser.streaming_translator.executor.shutdown(wait=True)
+                    
+                    # 모든 번역 작업이 완료될 때까지 대기
+                    remaining_tasks = self.worker.progress_parser.streaming_translator.wait_for_completion(timeout=30)
+                    self.worker.safe_emit(self.worker.log, f"번역 작업 완료 (남은 작업: {remaining_tasks})")
                     
                     # 추가 대기 시간 (버퍼 비우기)
                     time.sleep(1)
@@ -139,7 +172,20 @@ class VideoProcessor:
                     
                     # 실시간 번역 결과 가져오기
                     translation_results = self.worker.progress_parser.streaming_translator.get_results()
-                    
+                    # 중복 제거
+
+                    for lang_code in translation_results:
+                        seen = {}
+                        unique_segments = []
+
+                        for seg in translation_results[lang_code]:
+                            key = f"{seg['start']:.3f}-{seg['end']:.3f}"
+
+                            if key not in seen:
+                                seen[key] = True
+                                unique_segments.append(seg)
+                        translation_results[lang_code] = unique_segments
+
                     # 결과 검증
                     if not translation_results:
                         self.worker.safe_emit(
