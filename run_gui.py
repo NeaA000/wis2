@@ -7,6 +7,7 @@ import os
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
+import multiprocessing
 
 # 프로젝트 루트 디렉토리를 Python 경로에 추가
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +16,10 @@ from gui import MainWindow
 
 def main():
     """메인 함수"""
+    # Windows multiprocessing 지원
+    if sys.platform.startswith('win'):
+        multiprocessing.freeze_support()
+    
     # 고해상도 디스플레이 지원
     try:
         from PyQt6.QtCore import Qt

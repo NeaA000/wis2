@@ -169,11 +169,15 @@ class StreamingTranslator:
             if cached:
                 # 캐시된 결과 즉시 반환
                 if self.callback:
-                    segment_dict = {
-                        'start': seg.start,
-                        'end': seg.end,
-                        'text': seg.text
-                    }
+                    # segment 타입 확인 후 dict로 변환
+                    if isinstance(seg, dict):
+                        segment_dict = seg
+                    else:
+                        segment_dict = {
+                            'start': seg.start,
+                            'end': seg.end,
+                            'text': seg.text
+                        }
 
                     self.callback({
                         'type': 'translation',
@@ -250,11 +254,16 @@ class StreamingTranslator:
 
             # 콜백 호출
             if self.callback:
-                # Segment 객체를 dict로 변환
-                segment_dict = {
-                    'start': segment.start,
-                    'end': segment.end,
-                    'text': segment.text
+                # segment 타입 확인 후 dict로 변환
+                if isinstance(segment, dict):
+                    segment_dict = segment
+                elif hasattr(segment, '__dict__'):
+                    segment_dict = segment.__dict__
+                else:
+                    segment_dict = {
+                        'start': getattr(segment, 'start', 0),
+                        'end': getattr(segment, 'end', 0),
+                        'text': getattr(segment, 'text', str(segment))
                 }
 
                 self.callback({
@@ -271,11 +280,14 @@ class StreamingTranslator:
         except Exception as e:
             self.stats['failed_segments'] += 1
             if self.callback:
-                segment_dict = {
-                    'start': segment.start,
-                    'end': segment.end,
-                    'text': segment.text
-                }
+                if isinstance(segment, dict):
+                    segment_dict = segment
+                else:
+                    segment_dict = {
+                        'start': segment.start,
+                        'end': segment.end,
+                        'text': segment.text
+                    }
 
                 self.callback({
                     'type': 'error',
@@ -332,10 +344,16 @@ class StreamingTranslator:
                     })
 
                 if self.callback:
-                    segment_dict = {
-                        'start': seg.start,
-                        'end': seg.end,
-                        'text': seg.text
+                    # segment 타입 확인 후 dict로 변환
+                    if isinstance(seg, dict):
+                        segment_dict = seg
+                    elif hasattr(seg, '__dict__'):
+                        segment_dict = seg.__dict__
+                    else:
+                        segment_dict = {
+                            'start': getattr(seg, 'start', 0),
+                            'end': getattr(seg, 'end', 0),
+                            'text': getattr(seg, 'text', str(seg))
                     }
 
                     self.callback({

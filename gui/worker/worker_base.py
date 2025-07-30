@@ -132,9 +132,20 @@ class ProgressParser:
         def translation_callback(result):
             """번역 결과 콜백"""
             if result['type'] == 'translation':
+
+                # segment 타입 확인 및 안전한 dict 변환
+                segment = result['segment']
+
+                if isinstance(segment, dict):
+                    segment_dict = segment
+                elif hasattr(segment, '__dict__'):
+                    segment_dict = segment.__dict__
+                else:
+                    segment_dict = {'start': 0, 'end': 0, 'text': str(segment)}
+
                 self.worker.safe_emit(
                     self.worker.realtimeTranslation,
-                    result['segment'].__dict__,  # dataclass를 dict로 변환
+                    segment_dict,  # 안전하게 변환된 dict
                     result['language'],
                     result['translation']
                 )
