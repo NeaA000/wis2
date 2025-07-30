@@ -12,6 +12,8 @@ import time
 import tempfile
 import traceback
 import threading
+import psutil
+import gc
 
 class VideoProcessor:
     """비디오 처리 전담 클래스 - 실시간 번역 지원"""
@@ -67,6 +69,15 @@ class VideoProcessor:
         video_name = filename(video_path)
         self.worker.safe_emit(self.worker.log, f"\n[{idx+1}/{total}] {video_name} 처리 시작")
         
+        # 메모리 사용량 체크
+        memory_percent = psutil.virtual_memory().percent
+        if memory_percent > 80:
+            self.worker.safe_emit(
+                self.worker.log, 
+                f"⚠️ 메모리 사용률 높음: {memory_percent}%"
+            )
+            gc.collect()  # import gc는 파일 상단에 이미 있음
+        
         # 현재 비디오 경로 저장 (병렬 처리용)
         self.worker.current_video_path = video_path
         
@@ -105,21 +116,110 @@ class VideoProcessor:
             
             # 실시간 번역 결과 확인 및 통합
             if self.worker.realtime_translation_enabled and self.worker.progress_parser.streaming_translator:
-                # 감지된 세그먼트 가져오기
-                detected_segments = self.worker.progress_parser.get_detected_segments()
-                
-                # 실시간 번역 통계
-                stats = self.worker.progress_parser.streaming_translator.get_stats()
-                self.worker.safe_emit(
-                    self.worker.log,
-                    f"실시간 번역 완료 - 처리: {stats['translated_segments']}개, "
-                    f"캐시 사용: {stats['cache_hits']}개"
-                )
-                
-                # 번역 결과는 이미 realtimeTranslation 시그널로 전송됨
-                # 여기서는 파일로 저장만 수행
-            
-        
+                try:
+                    # 스트리밍 번역기 플러시 및 대기
+                    self.worker.safe_emit(self.worker.log, "실시간 번역 결과 수집 중...")
+                    self.worker.progress_parser.streaming_translator.flush_all()
+                    
+                    # executor 완전 종료 대기
+                    self.worker.safe_emit(self.worker.log, "번역 작업 완료 대기 중...")
+                    self.worker.progress_parser.streaming_translator.executor.shutdown(wait=True)
+                    
+                    # 추가 대기 시간 (버퍼 비우기)
+                    time.sleep(1)
+                    
+                    # 실시간 번역 통계
+                    stats = self.worker.progress_parser.streaming_translator.get_stats()
+                    self.worker.safe_emit(
+                        self.worker.log,
+                        f"실시간 번역 완료 - 처리: {stats['translated_segments']}개, "
+                        f"캐시 사용: {stats['cache_hits']}개, "
+                        f"평균 시간: {stats.get('average_time', 0):.2f}초"
+                    )
+                    
+                    # 실시간 번역 결과 가져오기
+                    translation_results = self.worker.progress_parser.streaming_translator.get_results()
+                    
+                    # 결과 검증
+                    if not translation_results:
+                        self.worker.safe_emit(
+                            self.worker.log,
+                            "⚠️ 실시간 번역 결과가 비어있음. 원본 세그먼트 수: " + 
+                            f"{len(result.get('segments', []))}"
+                        )
+                    else:
+                        self.worker.safe_emit(
+                            self.worker.log,
+                            f"번역 결과: {list(translation_results.keys())} 언어, "
+                            f"세그먼트 수: {[len(segs) for segs in translation_results.values()]}"
+                        )
+                    
+                    # 각 언어별로 저장
+                    for lang_code, translated_segments in translation_results.items():
+                        if translated_segments and not self.worker.is_cancelled:
+                            # 빈 세그먼트 필터링
+                            valid_segments = [
+                                seg for seg in translated_segments 
+                                if seg.get('text', '').strip()
+                            ]
+                            
+                            if not valid_segments:
+                                self.worker.safe_emit(
+                                    self.worker.log,
+                                    f"⚠️ {lang_code} 번역 결과가 비어있음 (원본: {len(translated_segments)}개)"
+                                )
+                                continue
+                            
+                            self.worker.safe_emit(
+                                self.worker.log,
+                                f"{lang_code} 처리 중: {len(valid_segments)}개 유효한 세그먼트"
+                            )
+                            
+                            # 중복 제거
+                            if self.worker.settings.get('advanced_duplicate_removal', True):
+                                valid_segments = advanced_remove_duplicates(valid_segments)
+                            else:
+                                valid_segments = remove_duplicate_segments(valid_segments)
+                            
+                            # SRT 파일 저장
+                            trans_srt_path = os.path.join(
+                                self.worker.settings['output_dir'],
+                                f"{video_name}_{lang_code.split('_')[0]}.srt"
+                            )
+                            
+                            with open(trans_srt_path, "w", encoding="utf-8") as srt_file:
+                                write_srt(valid_segments, srt_file)
+                            
+                            self.worker.safe_emit(self.worker.log, f"✓ {lang_code} 자막 저장: {trans_srt_path}")
+                            
+                            # 캐시 저장
+                            cache_path = self.worker.get_cache_path(video_path, lang_code)
+                            with open(cache_path, 'wb') as f:
+                                pickle.dump({
+                                    'subtitles': {video_path: trans_srt_path},
+                                    'segments': valid_segments
+                                }, f)
+                            
+                            # 비디오 임베딩
+                            if not self.worker.settings['srt_only']:
+                                self.embed_subtitles(
+                                    video_path, 
+                                    {video_path: trans_srt_path}, 
+                                    detected_lang, 
+                                    lang_code
+                                )
+                                
+                    # 메모리 정리
+                    self.worker.progress_parser.streaming_translator = None
+                    gc.collect()
+                    
+                except Exception as e:
+                    self.worker.safe_emit(
+                        self.worker.log,
+                        f"⚠️ 실시간 번역 결과 처리 중 오류: {str(e)}"
+                    )
+                    traceback.print_exc()
+
             # 병렬 처리에서 번역이 이미 완료된 경우
             if isinstance(result, dict) and 'translations' in result:
                 # 번역된 결과 저장
@@ -413,6 +513,40 @@ class VideoProcessor:
             f"✓ 병렬 처리 완료: {len(result['segments'])}개 세그먼트"
         )
         
+        # 실시간 번역이 활성화된 경우 동기화
+        if self.worker.realtime_translation_enabled and self.worker.progress_parser.streaming_translator:
+            try:
+                self.worker.safe_emit(
+                    self.worker.log,
+                    "병렬 처리 실시간 번역 결과 수집 중..."
+                )
+                
+                # 모든 번역 완료 대기
+                self.worker.progress_parser.streaming_translator.flush_all()
+                self.worker.progress_parser.streaming_translator.executor.shutdown(wait=True)
+                
+                # 추가 대기
+                time.sleep(1)
+                
+                # 결과 통합
+                streaming_results = self.worker.progress_parser.streaming_translator.get_results()
+                
+                # 병렬 처리 결과와 병합
+                if 'translations' not in formatted_result:
+                    formatted_result['translations'] = {}
+                
+                for lang, segments in streaming_results.items():
+                    if segments:
+                        # 시간순 정렬
+                        segments.sort(key=lambda x: x.get('start', 0))
+                        formatted_result['translations'][lang] = segments
+                        
+            except Exception as e:
+                self.worker.safe_emit(
+                    self.worker.log,
+                    f"병렬 처리 번역 결과 수집 오류: {str(e)}"
+                )
+                
         return formatted_result, detected_lang
         
     def save_subtitles(self, video_name, segments):
