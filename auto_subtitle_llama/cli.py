@@ -190,10 +190,12 @@ def translates(translate_to: str, text_batch: List[str], max_batch_size: int = N
        generated_tokens = model.generate(
            **model_inputs,
            forced_bos_token_id=tokenizer.lang_code_to_id[translate_to],
-           max_length=256,
-           num_beams=2,  # 속도 우선
-           no_repeat_ngram_size=3,
-           use_cache=True
+           max_length = 256,
+           min_length = 10,
+           num_beams = 3,
+           repetition_penalty = 1.5,
+           no_repeat_ngram_size = 4,
+           use_cache = True
        )
        translated_batch.extend(tokenizer.batch_decode(generated_tokens, skip_special_tokens=True))
    

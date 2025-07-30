@@ -129,9 +129,11 @@ class ParallelTranslator:
                     **model_inputs,
                     forced_bos_token_id=tokenizer.lang_code_to_id[target_lang],
                     max_length=256,
-                    num_beams=2,  # 속도 우선
-                    no_repeat_ngram_size=3,
-                    use_cache=True
+                    min_length = 10,
+                    num_beams = 3,
+                    repetition_penalty = 1.5,
+                    no_repeat_ngram_size = 4,  # 3 -> 4
+                    use_cache = True
                 )
                 
                 # 디코딩

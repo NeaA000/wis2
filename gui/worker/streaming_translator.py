@@ -222,10 +222,11 @@ class StreamingTranslator:
             outputs = self.model.generate(
                 **inputs,
                 forced_bos_token_id=self.tokenizer.lang_code_to_id[target_lang],
-                max_length=256,  # 128 -> 256으로 증가
-                num_beams=3,  # 1 -> 3으로 증가 (품질 향상)
-                temperature=0.8,  # 추가 (다양성 조절)
-                repetition_penalty=1.2,  # 추가 (반복 방지)
+                max_length=256,  # 증가
+                min_length = 10,  # 최소 길이 설정
+                num_beams = 3,  # 품질 향상
+                repetition_penalty = 1.5,  # 반복 방지
+                no_repeat_ngram_size = 3,  # 3-gram 반복 방지
                 do_sample=False
             )
 
@@ -305,8 +306,11 @@ class StreamingTranslator:
             outputs = self.model.generate(
                 **inputs,
                 forced_bos_token_id=self.tokenizer.lang_code_to_id[target_lang],
-                max_length=128,
-                num_beams=1,
+                max_length = 256,
+                min_length = 10,
+                num_beams = 3,
+                repetition_penalty = 1.5,
+                no_repeat_ngram_size=3,
             )
 
             translations = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
