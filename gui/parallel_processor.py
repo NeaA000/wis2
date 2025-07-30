@@ -64,12 +64,37 @@ class ParallelVideoProcessor:
         self.model_path = None
 
     def ensure_model_downloaded(self):
-       """모델이 다운로드되었는지 확인하고 경로 반환"""
-       import whisper
-       # 모델을 다운로드만 하고 로드하지 않음
-       model_path = whisper._download(whisper._MODELS[self.model_name])
-       return model_path
+        """모델이 다운로드되었는지 확인하고 경로 반환"""
+        import whisper
+        import os
 
+        # Whisper의 기본 캐시 디렉토리 (private API 사용하지 않음)
+        default_cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+        cache_dir = os.environ.get("WHISPER_CACHE_DIR", default_cache_dir)
+
+        # 캐시 디렉토리가 없으면 생성
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # 모델 파일 경로
+        model_filename = f"{self.model_name}.pt"
+        model_path = os.path.join(cache_dir, model_filename)
+
+        # 모델이 이미 있는지 확인
+        if not os.path.exists(model_path):
+            print(f"모델 다운로드 필요: {self.model_name}")
+            try:
+                # 모델 로드 시 자동으로 다운로드됨
+                # download_root 파라미터는 whisper 버전에 따라 지원되지 않을 수 있음
+                _ = whisper.load_model(self.model_name)
+                print(f"모델 다운로드 완료")
+            except Exception as e:
+                print(f"모델 다운로드 중 오류: {e}")
+                # 다른 방법 시도
+                _ = whisper.load_model(self.model_name)
+        else:
+            print(f"모델이 이미 존재함: {model_path}")
+
+        return model_path
 
         
     def get_video_duration(self, video_path: str) -> float:
@@ -539,10 +564,23 @@ class ParallelVideoProcessor:
             elif result.get('type') == 'translation':
                 # 실시간 번역 결과
                 if progress_callback:
+                    # Segment 객체 처리
+                    segment = result['segment']
+                    if isinstance(segment, dict):
+                        segment_dict = segment
+                    elif hasattr(segment, '__dict__'):  # dataclass
+                        segment_dict = {
+                            'start': segment.start,
+                            'end': segment.end,
+                            'text': segment.text
+                        }
+                    else:
+                        segment_dict = {'start': 0, 'end': 0, 'text': str(segment)}
+                    
                     progress_callback({
                         'type': 'realtime_translation',
                         'worker_id': result.get('worker_id'),
-                        'segment': result['segment'],
+                        'segment': segment_dict,
                         'language': result['language'],
                         'translation': result['translation']
                     }, 0)
@@ -550,9 +588,17 @@ class ParallelVideoProcessor:
                 lang = result['language']
                 if lang not in realtime_translations:
                     realtime_translations[lang] = []
+
+                # Segment 객체 처리
+                segment = result['segment']
+                if hasattr(segment, '__dict__'):  # dataclass인 경우
+                    segment_dict = segment.__dict__
+                else:  # 이미 dict인 경우
+                    segment_dict = segment
+
                 realtime_translations[lang].append({
-                    'start': result['segment']['start'],
-                    'end': result['segment']['end'],
+                    'start': segment_dict.get('start', 0),
+                    'end': segment_dict.get('end', 0),
                     'text': result['translation']
                 })
                     

@@ -203,6 +203,11 @@ class VideoProcessor:
             self.worker.safe_emit(self.worker.fileCompleted, video_name, srt_path)
             self.worker.safe_emit(self.worker.progress, video_name, 100, "완료!")
             
+            # 메모리 정리
+            if memory_percent > 70:
+                gc.collect()
+                self.worker.safe_emit(self.worker.log, "메모리 정리 완료")
+            
         except Exception as e:
             if not self.worker.is_cancelled:
                 self.worker.safe_emit(self.worker.log, f"❌ {video_name} 처리 중 오류: {str(e)}")
@@ -384,7 +389,11 @@ class VideoProcessor:
             chunk_duration=self.worker.settings.get('chunk_duration', 1800),
             progress_callback=progress_callback
         )
-        
+          # 결과 검증
+
+        if not result or not result.get('segments'):
+            raise Exception("병렬 처리 결과가 비어있습니다")
+
         # 에러 체크
         if result.get('errors'):
             self.worker.safe_emit(

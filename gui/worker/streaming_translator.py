@@ -161,9 +161,15 @@ class StreamingTranslator:
             if cached:
                 # 캐시된 결과 즉시 반환
                 if self.callback:
+                    segment_dict = {
+                        'start': seg.start,
+                        'end': seg.end,
+                        'text': seg.text
+                    }
+                    
                     self.callback({
                         'type': 'translation',
-                        'segment': seg,
+                        'segment': segment_dict,
                         'language': lang,
                         'translation': cached,
                         'from_cache': True,
@@ -235,9 +241,18 @@ class StreamingTranslator:
             
             # 콜백 호출
             if self.callback:
+                # Segment 객체를 dict로 변환
+                segment_dict = {
+                    'start': segment.start,
+                    'end': segment.end,
+                    'text': segment.text
+                }
+                if hasattr(segment, 'worker_id'):
+                    segment_dict['worker_id'] = segment.worker_id
+                    
                 self.callback({
                     'type': 'translation',
-                    'segment': segment,
+                    'segment': segment_dict,  # dataclass 대신 dict 전달
                     'language': target_lang,
                     'translation': translation,
                     'from_cache': False,
@@ -249,9 +264,15 @@ class StreamingTranslator:
         except Exception as e:
             self.stats['failed_segments'] += 1
             if self.callback:
+                segment_dict = {
+                    'start': segment.start,
+                    'end': segment.end,
+                    'text': segment.text
+                }
+                
                 self.callback({
                     'type': 'error',
-                    'segment': segment,
+                    'segment': segment_dict,
                     'language': target_lang,
                     'error': str(e)
                 })
@@ -278,7 +299,6 @@ class StreamingTranslator:
                 forced_bos_token_id=self.tokenizer.lang_code_to_id[target_lang],
                 max_length=128,
                 num_beams=1,
-                early_stopping=True
             )
             
             translations = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -300,9 +320,15 @@ class StreamingTranslator:
                    })
                 
                 if self.callback:
+                    segment_dict = {
+                        'start': seg.start,
+                        'end': seg.end,
+                        'text': seg.text
+                    }
+                    
                     self.callback({
                         'type': 'translation',
-                        'segment': seg,
+                        'segment': segment_dict,
                         'language': target_lang,
                         'translation': trans,
                         'from_cache': False,

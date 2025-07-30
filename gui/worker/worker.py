@@ -134,6 +134,13 @@ class SubtitleWorker(BaseSubtitleWorker):
             if not self.is_cancelled:
                 self.safe_emit(self.error, str(e))
                 traceback.print_exc()
+          # UI에 에러 상태 전달
+
+                if hasattr(self, 'current_video_path'):
+                    video_name = filename(self.current_video_path)
+                    self.safe_emit(self.fileCompleted, video_name, f"ERROR: {str(e)}")
+
+
         finally:
             # 정리 작업
             self.cleanup()
